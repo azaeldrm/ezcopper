@@ -39,11 +39,11 @@ docker compose up -d
 ## Features
 
 - **Multi-Channel** - Monitor multiple Discord channels simultaneously
-- **Rules Engine** - Web UI at `http://localhost:8001` for keyword + price filtering
+- **Rules Engine** - Web UI at `http://localhost:8001` for keyword + price filtering and visual event monitoring
 - **Visual Access** - noVNC viewer at `http://localhost:6080`
 - **REST API** - Status, control, and real-time events at `http://localhost:8000`
 - **Live Activity Feed** - Real-time monitoring of detected products and matches
-- **Safety Switch** - Pause before final order for manual confirmation
+- **Safety Switch** - Pause before final order for manual confirmation (can be disabled)
 - **Observability** - JSON logs, screenshots on failure, Playwright traces
 - **Dockerized** - Fully containerized with persistent storage
 
@@ -145,5 +145,3 @@ Educational purposes only. Use responsibly and in compliance with Discord's and 
 Python · FastAPI · Playwright · Docker · noVNC · Xvfb
 
 ---
-
-**Built for the drop hunters. Ready in seconds, checks out in milliseconds.**
