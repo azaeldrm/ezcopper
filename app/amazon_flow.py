@@ -413,51 +413,75 @@ class AmazonFlow:
         """Extract seller info from standard product page."""
         info = SellerInfo()
 
-        # Check for combined "Ships from and sold by Amazon.com"
-        try:
-            merchant = page.locator("#merchant-info").first
-            if await merchant.is_visible(timeout=1000):
-                text = (await merchant.inner_text()).strip()
-                info.raw_text = text
-                text_lower = text.lower()
+        # Try multiple buybox container selectors
+        buybox_selectors = [
+            "#merchant-info",
+            "#desktop_buybox",
+            "#buybox",
+            "#apex_desktop",
+            ".celwidget[data-feature-name='desktop-buybox']"
+        ]
 
-                # Pattern 1: "Ships from and sold by Amazon.com"
-                if "ships from and sold by amazon" in text_lower:
+        buybox_text = ""
+        for selector in buybox_selectors:
+            try:
+                element = page.locator(selector).first
+                if await element.is_visible(timeout=500):
+                    buybox_text = (await element.inner_text()).strip()
+                    if buybox_text:
+                        await self._log_step("debug_buybox_found", f"Found buybox with selector: {selector}", {"preview": buybox_text[:200]})
+                        break
+            except:
+                continue
+
+        if buybox_text:
+            info.raw_text = buybox_text
+            text_lower = buybox_text.lower()
+
+            # Pattern 1: "Ships from and sold by Amazon.com"
+            if "ships from and sold by amazon" in text_lower:
+                info.ships_from = "Amazon.com"
+                info.sold_by = "Amazon.com"
+                await self._log_step("debug_pattern_match", "Matched pattern: 'Ships from and sold by Amazon'")
+                return info
+
+            # Pattern 2: "Shipper / Seller\nAmazon.com" or similar label+value formats
+            lines = [line.strip() for line in buybox_text.split('\n') if line.strip()]
+
+            # Find lines that are just seller names (not labels)
+            # Labels to ignore: Shipper, Seller, Ships from, Sold by, Returns, etc.
+            label_keywords = ['shipper', 'seller', 'ships from', 'sold by', 'returns',
+                            'delivery', 'quantity', 'add to cart', 'buy now', 'customer',
+                            'service', 'see more', 'free', 'prime', 'deliver to']
+
+            data_lines = []
+            for line in lines:
+                line_lower = line.lower()
+                # Skip if it's a label or contains special chars suggesting it's a label
+                is_label = any(label in line_lower for label in label_keywords)
+                is_price = '$' in line or any(c.isdigit() for c in line) and '.' in line
+                is_short_price = line_lower in ['.', '..', '...']
+
+                if not is_label and not is_short_price:
+                    # Keep this line if it looks like actual data
+                    # But skip pure price lines like "$967.64"
+                    if is_price and len(line.replace('$', '').replace('.', '').replace(',', '').strip()) > 0:
+                        # It's a price line, skip it
+                        continue
+                    elif not is_price:
+                        data_lines.append(line)
+
+            await self._log_step("debug_data_lines", f"Extracted data lines: {data_lines}")
+
+            # If we found exactly one data line and it contains Amazon, that's our seller
+            if len(data_lines) >= 1:
+                amazon_lines = [line for line in data_lines if 'amazon' in line.lower()]
+                if amazon_lines:
+                    # All amazon mentions are the same seller
                     info.ships_from = "Amazon.com"
                     info.sold_by = "Amazon.com"
+                    await self._log_step("debug_pattern_match", f"Matched pattern: Found Amazon in data lines: {amazon_lines}")
                     return info
-
-                # Pattern 2: Just "Amazon.com" (both shipper and seller)
-                # This handles cases like "Shipper / Seller\nAmazon.com" or just "Amazon.com"
-                if text_lower.strip() == "amazon.com" or text_lower.strip() == "amazon":
-                    info.ships_from = "Amazon.com"
-                    info.sold_by = "Amazon.com"
-                    return info
-
-                # Pattern 3: Contains only "Amazon.com" after labels
-                # Handles "Shipper / Seller\nAmazon.com" format
-                lines = [line.strip() for line in text.split('\n') if line.strip()]
-                # Remove common label lines
-                data_lines = [line for line in lines if not any(label in line.lower() for label in ['ships from', 'sold by', 'shipper', 'seller', '/'])]
-                if len(data_lines) == 1 and 'amazon' in data_lines[0].lower():
-                    info.ships_from = "Amazon.com"
-                    info.sold_by = "Amazon.com"
-                    return info
-                # Handle case where all data lines are "Amazon.com" (labels on separate lines)
-                if len(data_lines) >= 1 and all('amazon' in line.lower() and line.lower().strip() in ['amazon', 'amazon.com'] for line in data_lines):
-                    info.ships_from = "Amazon.com"
-                    info.sold_by = "Amazon.com"
-                    return info
-
-                # Pattern 4: Look for "amazon" in the text as fallback
-                if 'amazon' in text_lower and not any(word in text_lower for word in ['warehouse', 'renewed', 'global']):
-                    # If it's just Amazon mentioned, likely both shipper and seller
-                    if text_lower.count('amazon') == 1:
-                        info.ships_from = "Amazon.com"
-                        info.sold_by = "Amazon.com"
-                        return info
-        except:
-            pass
 
         # Try tabular buybox format
         try:
