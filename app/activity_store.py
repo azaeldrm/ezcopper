@@ -3,13 +3,14 @@ Persistent storage for detected items/activity feed.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime, timezone
 import threading
 
 ACTIVITY_FILE = Path("/data/activity.json")
-MAX_ITEMS = 100
+MAX_ITEMS = int(os.getenv("MAX_ACTIVITY_ITEMS", "100"))
 
 _lock = threading.Lock()
 
