@@ -517,6 +517,29 @@ class AmazonFlow:
             "raw_text": info.raw_text
         })
 
+        # If extraction failed, capture page state for debugging
+        if not info.ships_from and not info.sold_by:
+            try:
+                # Take screenshot
+                screenshot_path = await browser_manager.take_screenshot("seller_extraction_failed")
+
+                # Get visible text from buybox area
+                buybox_text = ""
+                try:
+                    buybox = page.locator("#desktop_buybox, #buybox, #apex_desktop").first
+                    if await buybox.is_visible(timeout=1000):
+                        buybox_text = await buybox.inner_text()
+                except:
+                    pass
+
+                await self._log_step("debug_extraction_failed", "Seller extraction failed - captured page state", {
+                    "screenshot": screenshot_path,
+                    "buybox_text_preview": buybox_text[:500] if buybox_text else "No buybox found",
+                    "page_url": page.url
+                })
+            except:
+                pass
+
         return info
 
     async def _extract_price(self, page: Page, is_aod: bool) -> PriceInfo:
