@@ -1064,7 +1064,8 @@ class AmazonFlow:
 
         for attempt in range(MAX_RETRIES):
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=self.TIMEOUTS["page_load"])
+                # Try without wait_until first - just navigate and check URL
+                await page.goto(url, timeout=self.TIMEOUTS["page_load"])
                 await asyncio.sleep(WAIT_SECONDS_DYNAMIC_CONTENT)  # Wait for dynamic content
 
                 # Check if we landed on a product page
