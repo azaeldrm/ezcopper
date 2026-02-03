@@ -10,7 +10,8 @@ from typing import List
 from dataclasses import dataclass, asdict
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.activity_store import load_activity
@@ -77,6 +78,10 @@ def get_blacklist_rules() -> List[Rule]:
 # Create FastAPI app for rules UI
 rules_app = FastAPI(title="Purchase Rules Manager")
 
+# Mount static files directory
+static_dir = Path(__file__).parent / "static"
+rules_app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -84,7 +89,11 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#1a1a2e">
     <title>EZCopper</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png">
+    <link rel="apple-touch-icon" href="/static/icon-192.png">
+    <link rel="manifest" href="/manifest.json">
     <style>
         * {
             box-sizing: border-box;
@@ -1007,3 +1016,30 @@ async def get_blacklist_rules_api():
 async def get_activity():
     """Get activity history."""
     return load_activity()
+
+
+@rules_app.get("/manifest.json")
+async def get_manifest():
+    """Serve PWA manifest."""
+    manifest = {
+        "name": "EZCopper",
+        "short_name": "EZCopper",
+        "description": "Amazon purchase automation and rules management",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#1a1a2e",
+        "theme_color": "#1a1a2e",
+        "icons": [
+            {
+                "src": "/static/icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png"
+            },
+            {
+                "src": "/static/icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png"
+            }
+        ]
+    }
+    return JSONResponse(content=manifest)
