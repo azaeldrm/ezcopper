@@ -979,10 +979,11 @@ class AmazonFlow:
                 if not result.success:
                     return result
 
-            # Step 6: Add to cart
-            await self._log_step("adding_to_cart", "Clicking Add to Cart...")
+            # Step 6: Add to cart or Buy Now
+            used_buy_now = False
             if aod_offer and aod_offer.get("add_button"):
                 # Use the specific offer's add button from AOD
+                await self._log_step("adding_to_cart", "Clicking Add to Cart for selected AOD offer...")
                 try:
                     await aod_offer["add_button"].click()
                     await asyncio.sleep(WAIT_SECONDS_DYNAMIC_CONTENT)
@@ -995,23 +996,32 @@ class AmazonFlow:
                         details={"error": str(e)}
                     )
             else:
-                # Use standard add to cart step
-                result = await self._step_add_to_cart(page)
+                # Standard page - try Buy Now first (goes directly to checkout)
+                buy_now_clicked = await self._try_buy_now(page)
+                if buy_now_clicked:
+                    used_buy_now = True
+                    await self._log_step("used_buy_now", "Clicked Buy Now - going directly to checkout")
+                else:
+                    # Fall back to Add to Cart
+                    await self._log_step("adding_to_cart", "Clicking Add to Cart...")
+                    result = await self._step_add_to_cart(page)
+                    if not result.success:
+                        return result
+                    await self._log_step("added_to_cart", "Item added to cart")
+
+            # Step 7: Cart confirmation (skip if Buy Now was used)
+            if not used_buy_now:
+                result = await self._step_wait_cart_confirmation(page)
                 if not result.success:
                     return result
-            await self._log_step("added_to_cart", "Item added to cart")
+                await self._log_step("cart_confirmed", "Cart confirmation received")
 
-            # Step 5: Wait for cart confirmation / side panel
-            result = await self._step_wait_cart_confirmation(page)
-            if not result.success:
-                return result
-            await self._log_step("cart_confirmed", "Cart confirmation received")
+                # Step 8: Proceed to checkout
+                await self._log_step("proceeding_to_checkout", "Proceeding to checkout...")
+                result = await self._step_proceed_to_checkout(page)
+                if not result.success:
+                    return result
 
-            # Step 6: Proceed to checkout
-            await self._log_step("proceeding_to_checkout", "Proceeding to checkout...")
-            result = await self._step_proceed_to_checkout(page)
-            if not result.success:
-                return result
             await self._log_step("on_checkout_page", "On checkout page")
 
             # Step 7: Place order
@@ -1091,6 +1101,28 @@ class AmazonFlow:
             message="Failed to load product page",
             details={"url": url}
         )
+
+    async def _try_buy_now(self, page: Page) -> bool:
+        """Try to click Buy Now button (goes directly to checkout). Returns True if clicked."""
+        buy_now_selectors = [
+            "#buy-now-button",
+            "input[name='submit.buy-now']",
+            "[data-feature-id='buy-now'] input",
+            ".a-button-input[aria-labelledby='buy-now-button-announce']",
+        ]
+
+        for selector in buy_now_selectors:
+            try:
+                elem = page.locator(selector).first
+                if await elem.is_visible(timeout=1000):
+                    await elem.click()
+                    await asyncio.sleep(WAIT_SECONDS_DYNAMIC_CONTENT)
+                    self._update_state(FlowState.ON_CHECKOUT_PAGE)
+                    return True
+            except:
+                continue
+
+        return False
 
     async def _step_add_to_cart(self, page: Page) -> FlowResult:
         """Step 2: Click Add to Cart button."""
