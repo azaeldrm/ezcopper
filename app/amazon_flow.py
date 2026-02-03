@@ -473,6 +473,43 @@ class AmazonFlow:
         except:
             pass
 
+        # Aggressive fallback: Search entire page for "Ships from" / "Sold by" text
+        if not info.ships_from or not info.sold_by:
+            try:
+                # Look for ANY element containing "Ships from" or "Sold by"
+                page_text = await page.content()
+                await self._log_step("debug_page_search", "Searching entire page for seller info")
+
+                # Try to find ships_from
+                if not info.ships_from:
+                    ships_elem = page.locator("text=/Ships from/i").first
+                    if await ships_elem.is_visible(timeout=500):
+                        # Get parent container and extract text
+                        parent = ships_elem.locator("xpath=ancestor::div[1]")
+                        text = await parent.inner_text()
+                        # Parse out the shipper name (usually on next line or after "Ships from")
+                        lines = [l.strip() for l in text.split('\n') if l.strip()]
+                        for i, line in enumerate(lines):
+                            if 'ships from' in line.lower() and i + 1 < len(lines):
+                                info.ships_from = lines[i + 1]
+                                await self._log_step("debug_ships_from", f"Found ships_from via page search: '{info.ships_from}'")
+                                break
+
+                # Try to find sold_by
+                if not info.sold_by:
+                    sold_elem = page.locator("text=/Sold by/i").first
+                    if await sold_elem.is_visible(timeout=500):
+                        parent = sold_elem.locator("xpath=ancestor::div[1]")
+                        text = await parent.inner_text()
+                        lines = [l.strip() for l in text.split('\n') if l.strip()]
+                        for i, line in enumerate(lines):
+                            if 'sold by' in line.lower() and i + 1 < len(lines):
+                                info.sold_by = lines[i + 1]
+                                await self._log_step("debug_sold_by", f"Found sold_by via page search: '{info.sold_by}'")
+                                break
+            except:
+                pass
+
         # Debug log final extraction
         await self._log_step("debug_standard_final", f"Standard extraction complete", {
             "ships_from": info.ships_from,
