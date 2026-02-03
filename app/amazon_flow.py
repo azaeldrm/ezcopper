@@ -193,10 +193,26 @@ class AmazonFlow:
             ".a-box-inner h1:has-text('Order placed')",
             "#widget-purchaseSummary",
         ],
+        # Product availability
+        "currently_unavailable": [
+            "#availability span:has-text('Currently unavailable')",
+            ".a-size-medium:has-text('Currently unavailable')",
+            "text='Currently unavailable'",
+        ],
+        "see_all_buying_options": [
+            "#buybox-see-all-buying-choices",
+            "a:has-text('See All Buying Options')",
+            "#desktop_buybox_content a:has-text('See All Buying Options')",
+        ],
         # AOD Panel - No offers detection
         "aod_no_offers": [
             "text='No featured offers available'",
             "#aod-pinned-offer-show-more-link-announcement",
+        ],
+        # AOD Panel - Offer cards
+        "aod_offer_cards": [
+            "#aod-offer",
+            ".aod-offer-container",
         ],
         # AOD Panel - See more expansion
         "aod_see_more": [
@@ -431,8 +447,12 @@ class AmazonFlow:
                     if buybox_text:
                         await self._log_step("debug_buybox_found", f"Found buybox with selector: {selector}", {"preview": buybox_text[:200]})
                         break
-            except:
-                continue
+                    else:
+                        await self._log_step("debug_buybox_empty", f"Selector {selector} found but text empty")
+                else:
+                    await self._log_step("debug_buybox_not_visible", f"Selector {selector} not visible")
+            except Exception as e:
+                await self._log_step("debug_buybox_error", f"Selector {selector} error: {str(e)}")
 
         if buybox_text:
             info.raw_text = buybox_text
@@ -588,6 +608,129 @@ class AmazonFlow:
 
         return PriceInfo(raw_text="Price not found")
 
+    async def _check_currently_unavailable(self, page: Page) -> bool:
+        """Check if product is currently unavailable."""
+        for selector in self.SELECTORS.get("currently_unavailable", []):
+            try:
+                elem = page.locator(selector).first
+                if await elem.is_visible(timeout=500):
+                    return True
+            except:
+                continue
+        return False
+
+    async def _check_and_click_see_all_options(self, page: Page) -> bool:
+        """Check for 'See All Buying Options' and click it. Returns True if clicked."""
+        for selector in self.SELECTORS.get("see_all_buying_options", []):
+            try:
+                elem = page.locator(selector).first
+                if await elem.is_visible(timeout=1000):
+                    await self._log_step("clicking_see_all_options", "Clicking 'See All Buying Options'")
+                    await elem.click()
+                    await asyncio.sleep(2)  # Wait for AOD page to load
+                    return True
+            except:
+                continue
+        return False
+
+    async def _find_valid_amazon_offer_in_aod(self, page: Page) -> Optional[Dict[str, Any]]:
+        """
+        Traverse AOD offers to find first valid Amazon offer.
+        Valid = Ships from Amazon.com AND (Sold by Amazon.com OR Amazon Resale OR Amazon Warehouse)
+        Returns dict with offer info if found, None otherwise.
+        """
+        await self._log_step("aod_traversing", "Searching AOD offers for valid Amazon seller...")
+
+        # Check for no offers message
+        try:
+            no_offers = page.locator("text='No featured offers available'").first
+            if await no_offers.is_visible(timeout=1000):
+                await self._log_step("aod_no_offers", "No featured offers available")
+                return None
+        except:
+            pass
+
+        # Try to expand "See more" if available
+        try:
+            see_more = page.locator("#aod-pinned-offer-show-more-link").first
+            if await see_more.is_visible(timeout=500):
+                await see_more.click()
+                await asyncio.sleep(0.5)
+        except:
+            pass
+
+        # Get all offer cards
+        offer_cards = page.locator("#aod-offer")
+        count = await offer_cards.count()
+        await self._log_step("aod_offers_found", f"Found {count} offers in AOD", {"count": count})
+
+        # Traverse each offer
+        for i in range(count):
+            offer = offer_cards.nth(i)
+
+            # Extract seller info from this offer
+            ships_from = None
+            sold_by = None
+
+            # Try to get ships from
+            try:
+                ships_elem = offer.locator("#aod-offer-shipsFrom .a-size-small").last
+                if await ships_elem.is_visible(timeout=300):
+                    ships_from = (await ships_elem.inner_text()).strip()
+            except:
+                pass
+
+            # Try to get sold by
+            try:
+                sold_elem = offer.locator("#aod-offer-soldBy a, #aod-offer-soldBy .a-size-small").last
+                if await sold_elem.is_visible(timeout=300):
+                    sold_by = (await sold_elem.inner_text()).strip()
+            except:
+                pass
+
+            await self._log_step("aod_offer_checked", f"Offer {i+1}: Ships from '{ships_from}', Sold by '{sold_by}'", {
+                "offer_index": i,
+                "ships_from": ships_from,
+                "sold_by": sold_by
+            })
+
+            # Validate this offer
+            is_valid_shipper = ships_from and ships_from.strip().lower() == "amazon.com"
+            is_valid_seller = sold_by and any(
+                keyword in sold_by.lower()
+                for keyword in ["amazon.com", "amazon resale", "amazon warehouse"]
+            )
+
+            if is_valid_shipper and is_valid_seller:
+                await self._log_step("aod_valid_offer_found", f"Valid Amazon offer found at index {i}", {
+                    "ships_from": ships_from,
+                    "sold_by": sold_by,
+                    "offer_index": i
+                })
+
+                # Try to click "Add to Cart" or select button for this offer
+                try:
+                    add_button = offer.locator("input[name='submit.addToCart'], .a-button-input").first
+                    if await add_button.is_visible(timeout=500):
+                        await self._log_step("aod_selecting_offer", f"Selecting offer {i}")
+                        # Store seller info for validation tracking
+                        self._seller_info = SellerInfo(
+                            ships_from=ships_from,
+                            sold_by=sold_by,
+                            raw_text=f"Ships from {ships_from}, Sold by {sold_by}"
+                        )
+                        return {
+                            "offer_index": i,
+                            "ships_from": ships_from,
+                            "sold_by": sold_by,
+                            "add_button": add_button
+                        }
+                except Exception as e:
+                    await self._log_step("aod_select_error", f"Error selecting offer {i}: {str(e)}")
+
+        await self._log_step("aod_no_valid_offer", "No valid Amazon offer found in AOD")
+        return None
+
     async def _log_step(self, step: str, message: str, details: Dict[str, Any] = None) -> None:
         """Publish event and append to activity item steps."""
         await event_broker.publish(event_broker.create_event(
@@ -737,22 +880,68 @@ class AmazonFlow:
                 return result
             await self._log_step("page_loaded", "Product page loaded")
 
-            # Step 2: Validate seller (NEW)
-            result = await self._step_validate_seller(page, is_aod)
-            if not result.success:
-                return result
+            # Step 2: Check product availability
+            if await self._check_currently_unavailable(page):
+                await self._log_step("product_unavailable", "Product is currently unavailable")
+                return FlowResult(
+                    success=False,
+                    state=FlowState.ERROR,
+                    message="Product is currently unavailable",
+                    details={}
+                )
 
-            # Step 3: Validate price (NEW)
+            # Step 3: Handle "See All Buying Options" for standard pages
+            if not is_aod:
+                clicked = await self._check_and_click_see_all_options(page)
+                if clicked:
+                    is_aod = True  # Now we're on AOD page
+                    await self._log_step("navigated_to_aod", "Navigated to AOD page from 'See All Buying Options'")
+
+            # Step 4: Handle AOD offer selection OR standard seller validation
+            aod_offer = None
+            if is_aod:
+                # Find and select valid Amazon offer
+                aod_offer = await self._find_valid_amazon_offer_in_aod(page)
+                if not aod_offer:
+                    return FlowResult(
+                        success=False,
+                        state=FlowState.ERROR,
+                        message="No valid Amazon offer found in AOD",
+                        details={}
+                    )
+                # Seller validation already done in AOD traversal, skip separate validation
+            else:
+                # Standard page - validate seller
+                result = await self._step_validate_seller(page, is_aod)
+                if not result.success:
+                    return result
+
+            # Step 5: Validate price
             if expected_price is not None:
                 result = await self._step_validate_price(page, expected_price, is_aod)
                 if not result.success:
                     return result
 
-            # Step 4: Add to cart
+            # Step 6: Add to cart
             await self._log_step("adding_to_cart", "Clicking Add to Cart...")
-            result = await self._step_add_to_cart(page)
-            if not result.success:
-                return result
+            if aod_offer and aod_offer.get("add_button"):
+                # Use the specific offer's add button from AOD
+                try:
+                    await aod_offer["add_button"].click()
+                    await asyncio.sleep(WAIT_SECONDS_DYNAMIC_CONTENT)
+                    self._update_state(FlowState.WAITING_CART_CONFIRMATION)
+                except Exception as e:
+                    return FlowResult(
+                        success=False,
+                        state=FlowState.ERROR,
+                        message=f"Failed to click Add to Cart for selected offer: {str(e)}",
+                        details={"error": str(e)}
+                    )
+            else:
+                # Use standard add to cart step
+                result = await self._step_add_to_cart(page)
+                if not result.success:
+                    return result
             await self._log_step("added_to_cart", "Item added to cart")
 
             # Step 5: Wait for cart confirmation / side panel
