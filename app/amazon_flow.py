@@ -674,17 +674,33 @@ class AmazonFlow:
 
             # Try to get ships from
             try:
-                ships_elem = offer.locator("#aod-offer-shipsFrom .a-size-small").last
+                # Get the ships from value (not the label)
+                ships_elem = offer.locator("#aod-offer-shipsFrom .a-size-small:not(.a-color-secondary)").first
                 if await ships_elem.is_visible(timeout=300):
                     ships_from = (await ships_elem.inner_text()).strip()
             except:
                 pass
 
-            # Try to get sold by
+            # Try to get sold by - prioritize link (seller name) over rating text
             try:
-                sold_elem = offer.locator("#aod-offer-soldBy a, #aod-offer-soldBy .a-size-small").last
-                if await sold_elem.is_visible(timeout=300):
-                    sold_by = (await sold_elem.inner_text()).strip()
+                # First try to find seller link
+                sold_link = offer.locator("#aod-offer-soldBy a[href*='seller']").first
+                if await sold_link.is_visible(timeout=300):
+                    sold_by = (await sold_link.inner_text()).strip()
+                else:
+                    # Fallback: get text but filter out rating patterns
+                    sold_text_elem = offer.locator("#aod-offer-soldBy").first
+                    if await sold_text_elem.is_visible(timeout=300):
+                        text = (await sold_text_elem.inner_text()).strip()
+                        # Remove "Sold by" label and rating info
+                        lines = [line.strip() for line in text.split('\n') if line.strip()]
+                        for line in lines:
+                            # Skip label and rating lines
+                            if 'sold by' in line.lower() or 'rating' in line.lower() or '%' in line:
+                                continue
+                            # This should be the seller name
+                            sold_by = line
+                            break
             except:
                 pass
 
