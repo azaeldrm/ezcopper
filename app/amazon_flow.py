@@ -472,7 +472,8 @@ class AmazonFlow:
             # Labels to ignore: Shipper, Seller, Ships from, Sold by, Returns, etc.
             label_keywords = ['shipper', 'seller', 'ships from', 'sold by', 'returns',
                             'delivery', 'quantity', 'add to cart', 'buy now', 'customer',
-                            'service', 'see more', 'free', 'prime', 'deliver to']
+                            'service', 'see more', 'free', 'prime', 'deliver to', 'available',
+                            'ship', 'payment', 'secure', 'transaction', 'protection', 'plan']
 
             data_lines = []
             for line in lines:
@@ -497,17 +498,28 @@ class AmazonFlow:
             # The pattern is: "Shipper / Seller" label followed by the seller name
             # Data lines should contain the seller name after filtering out labels
             if len(data_lines) >= 1:
-                # Find the first line that looks like a seller name (not a number, not too short)
+                # Prioritize finding Amazon or seller-like names
                 seller_name = None
+
+                # First pass: Look for Amazon
                 for line in data_lines:
-                    # Skip numeric lines, very short lines, and common non-seller text
                     if line.isdigit() or len(line) < 3:
                         continue
-                    if any(word in line.lower() for word in ['refund', 'replacement', 'add to list']):
-                        continue
-                    # This looks like a seller name
-                    seller_name = line
-                    break
+                    if 'amazon' in line.lower():
+                        seller_name = line
+                        break
+
+                # Second pass: Look for other seller names if Amazon not found
+                if not seller_name:
+                    for line in data_lines:
+                        # Skip numeric lines, very short lines, and common non-seller text
+                        if line.isdigit() or len(line) < 3:
+                            continue
+                        if any(word in line.lower() for word in ['refund', 'replacement', 'add to list', 'payment', 'return']):
+                            continue
+                        # This looks like a seller name
+                        seller_name = line
+                        break
 
                 if seller_name:
                     await self._log_step("debug_seller_name_found", f"Found seller name: {seller_name}")
@@ -694,10 +706,19 @@ class AmazonFlow:
 
             # Try to get ships from
             try:
-                # Get the ships from value (not the label)
-                ships_elem = offer.locator("#aod-offer-shipsFrom .a-size-small:not(.a-color-secondary)").first
-                if await ships_elem.is_visible(timeout=300):
-                    ships_from = (await ships_elem.inner_text()).strip()
+                # Get all text in the ships-from section and parse it
+                ships_container = offer.locator("#aod-offer-shipsFrom").first
+                if await ships_container.is_visible(timeout=300):
+                    text = (await ships_container.inner_text()).strip()
+                    # Format is usually "Ships from\nAmazon.com" or similar
+                    lines = [l.strip() for l in text.split('\n') if l.strip()]
+                    for line in lines:
+                        # Skip the label line
+                        if 'ships from' in line.lower():
+                            continue
+                        # This should be the shipper name
+                        ships_from = line
+                        break
             except:
                 pass
 
