@@ -1279,6 +1279,29 @@ async def get_activity():
     return load_activity()
 
 
+@rules_app.post("/actions/trigger")
+async def trigger_flow_proxy(request: dict):
+    """Proxy trigger requests to main app."""
+    import urllib.request
+    import urllib.error
+
+    try:
+        data = json.dumps(request).encode('utf-8')
+        req = urllib.request.Request(
+            "http://localhost:8000/actions/trigger",
+            data=data,
+            headers={'Content-Type': 'application/json'}
+        )
+
+        with urllib.request.urlopen(req, timeout=5) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            return JSONResponse(content=result)
+    except urllib.error.HTTPError as e:
+        raise HTTPException(status_code=e.code, detail=f"Trigger failed: {e.reason}")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Failed to trigger: {str(e)}")
+
+
 @rules_app.get("/manifest.json")
 async def get_manifest():
     """Serve PWA manifest."""
