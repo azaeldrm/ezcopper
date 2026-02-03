@@ -1071,8 +1071,8 @@ HTML_TEMPLATE = """
         }
 
         function renderTriggerButton(item) {
-            // Only show trigger button for matched items with Amazon URLs
-            if (!item.triggered || !item.amazon_urls || item.amazon_urls.length === 0) {
+            // Show trigger button for all items with Amazon URLs
+            if (!item.amazon_urls || item.amazon_urls.length === 0) {
                 return '';
             }
             const url = item.amazon_urls[0];
