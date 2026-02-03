@@ -368,6 +368,29 @@ class AmazonFlow:
             except:
                 continue
 
+        # If we found ships_from but not sold_by, check if they might be combined
+        # or if just "Amazon.com" means both
+        if info.ships_from and not info.sold_by:
+            if 'amazon' in info.ships_from.lower():
+                info.sold_by = info.ships_from
+        elif info.sold_by and not info.ships_from:
+            if 'amazon' in info.sold_by.lower():
+                info.ships_from = info.sold_by
+
+        # Try to get combined seller info from AOD panel
+        if not info.ships_from and not info.sold_by:
+            try:
+                # Look for combined seller info in AOD panel
+                seller_elem = page.locator("#aod-pinned-offer #aod-offer-seller, #aod-pinned-offer .a-popover-trigger").first
+                if await seller_elem.is_visible(timeout=500):
+                    text = (await seller_elem.inner_text()).strip()
+                    if 'amazon' in text.lower():
+                        info.ships_from = "Amazon.com"
+                        info.sold_by = "Amazon.com"
+                        info.raw_text = text
+            except:
+                pass
+
         return info
 
     async def _extract_seller_info_standard(self, page: Page) -> SellerInfo:
@@ -378,12 +401,45 @@ class AmazonFlow:
         try:
             merchant = page.locator("#merchant-info").first
             if await merchant.is_visible(timeout=1000):
-                text = (await merchant.inner_text()).lower()
+                text = (await merchant.inner_text()).strip()
                 info.raw_text = text
-                if "ships from and sold by amazon" in text:
+                text_lower = text.lower()
+
+                # Pattern 1: "Ships from and sold by Amazon.com"
+                if "ships from and sold by amazon" in text_lower:
                     info.ships_from = "Amazon.com"
                     info.sold_by = "Amazon.com"
                     return info
+
+                # Pattern 2: Just "Amazon.com" (both shipper and seller)
+                # This handles cases like "Shipper / Seller\nAmazon.com" or just "Amazon.com"
+                if text_lower.strip() == "amazon.com" or text_lower.strip() == "amazon":
+                    info.ships_from = "Amazon.com"
+                    info.sold_by = "Amazon.com"
+                    return info
+
+                # Pattern 3: Contains only "Amazon.com" after labels
+                # Handles "Shipper / Seller\nAmazon.com" format
+                lines = [line.strip() for line in text.split('\n') if line.strip()]
+                # Remove common label lines
+                data_lines = [line for line in lines if not any(label in line.lower() for label in ['ships from', 'sold by', 'shipper', 'seller', '/'])]
+                if len(data_lines) == 1 and 'amazon' in data_lines[0].lower():
+                    info.ships_from = "Amazon.com"
+                    info.sold_by = "Amazon.com"
+                    return info
+                # Handle case where all data lines are "Amazon.com" (labels on separate lines)
+                if len(data_lines) >= 1 and all('amazon' in line.lower() and line.lower().strip() in ['amazon', 'amazon.com'] for line in data_lines):
+                    info.ships_from = "Amazon.com"
+                    info.sold_by = "Amazon.com"
+                    return info
+
+                # Pattern 4: Look for "amazon" in the text as fallback
+                if 'amazon' in text_lower and not any(word in text_lower for word in ['warehouse', 'renewed', 'global']):
+                    # If it's just Amazon mentioned, likely both shipper and seller
+                    if text_lower.count('amazon') == 1:
+                        info.ships_from = "Amazon.com"
+                        info.sold_by = "Amazon.com"
+                        return info
         except:
             pass
 
