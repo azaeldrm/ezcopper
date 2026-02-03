@@ -500,6 +500,60 @@ HTML_TEMPLATE = """
             border-color: #666;
             color: #aaa;
         }
+        /* Result Badges */
+        .result-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 0.75em;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+        .result-badge.pending { background: #ffa50233; color: #ffa502; }
+        .result-badge.success { background: #4cd13733; color: #4cd137; }
+        .result-badge.failure { background: #ff475733; color: #ff4757; }
+        .failure-reason {
+            font-size: 0.8em;
+            color: #ff4757;
+            margin-top: 4px;
+            padding: 4px 8px;
+            background: #ff475711;
+            border-radius: 4px;
+            word-break: break-word;
+        }
+        /* Steps Section */
+        .steps-toggle {
+            background: transparent;
+            border: 1px solid #333;
+            color: #888;
+            padding: 4px 8px;
+            font-size: 0.75em;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-top: 8px;
+        }
+        .steps-toggle:hover { border-color: #00d4ff; color: #00d4ff; }
+        .steps-container {
+            display: none;
+            margin-top: 10px;
+            padding: 10px;
+            background: #0a0a1a;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .steps-container.expanded { display: block; }
+        .step-entry {
+            font-size: 0.8em;
+            padding: 4px 0;
+            border-bottom: 1px solid #1a1a2e;
+            display: flex;
+            gap: 10px;
+        }
+        .step-entry:last-child { border-bottom: none; }
+        .step-time { color: #666; min-width: 70px; }
+        .step-name { color: #00d4ff; min-width: 120px; }
+        .step-message { color: #aaa; flex: 1; }
     </style>
 </head>
 <body>
@@ -707,6 +761,7 @@ HTML_TEMPLATE = """
             const channel = details.channel || '';
             const amazonUrls = details.amazon_urls || [];
             const productUrl = amazonUrls.length > 0 ? amazonUrls[0] : '';
+            const messageId = details.message_id || '';
 
             // Debug logging
             console.log('Feed item data:', {
@@ -714,6 +769,7 @@ HTML_TEMPLATE = """
                 product: product,
                 amazonUrls: amazonUrls,
                 productUrl: productUrl,
+                messageId: messageId,
                 fullDetails: details
             });
 
@@ -754,10 +810,17 @@ HTML_TEMPLATE = """
                 ? `<a href="${escapeHtml(productUrl)}" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: none; cursor: pointer;">${productText}</a>`
                 : productText;
 
+            // Steps section for triggered items (starts empty, fills via SSE)
+            const stepsSection = isTriggered && messageId ? `
+                <button class="steps-toggle" onclick="toggleSteps(this)">0 steps ▼</button>
+                <div class="steps-container" data-message-id="${escapeHtml(messageId)}"></div>
+            ` : '';
+
             const item = document.createElement('div');
             item.className = 'feed-item ' + itemClass;
             item.dataset.product = product.substring(0, 100); // Store for dedup
             item.dataset.channel = channel; // Store for per-channel dedup
+            item.dataset.messageId = messageId; // Store for step updates
             item.innerHTML = `
                 <div class="feed-item-header">
                     <span class="feed-verdict ${verdictClass}">${verdictText}</span>
@@ -771,6 +834,7 @@ HTML_TEMPLATE = """
                     ${price ? `<span class="feed-price">${price}</span>` : ''}
                     ${discount ? `<span class="feed-discount">${discount}</span>` : ''}
                 </div>
+                ${stepsSection}
             `;
 
             feed.insertBefore(item, feed.firstChild);
@@ -852,7 +916,66 @@ HTML_TEMPLATE = """
                     )) {
                         addFeedItem(data);
                     }
-                } catch (e) {}
+
+                    // Real-time step updates for flow progress
+                    const messageId = data.details?.message_id;
+                    if (messageId && data.details?.message) {
+                        const container = document.querySelector(`[data-message-id="${messageId}"]`);
+                        if (container) {
+                            // Append new step
+                            const stepHtml = `
+                                <div class="step-entry">
+                                    <span class="step-time">${formatTime(data.ts || new Date().toISOString())}</span>
+                                    <span class="step-name">${escapeHtml(data.step || '')}</span>
+                                    <span class="step-message">${escapeHtml(data.details?.message || '')}</span>
+                                </div>
+                            `;
+                            container.insertAdjacentHTML('beforeend', stepHtml);
+                            // Update toggle button count
+                            const toggle = container.previousElementSibling;
+                            if (toggle && toggle.classList.contains('steps-toggle')) {
+                                const count = container.children.length;
+                                const expanded = container.classList.contains('expanded');
+                                toggle.textContent = `${count} steps ${expanded ? '▲' : '▼'}`;
+                            }
+                            // Auto-scroll to bottom if expanded
+                            if (container.classList.contains('expanded')) {
+                                container.scrollTop = container.scrollHeight;
+                            }
+                        }
+                    }
+
+                    // Update result badge when flow completes
+                    if (data.step === 'amazon_flow_complete' && data.details?.message_id) {
+                        const feedItem = document.querySelector(`[data-message-id="${data.details.message_id}"]`)?.closest('.feed-item');
+                        if (feedItem) {
+                            const status = data.details.success ? 'success' : 'failure';
+                            // Add or update result badge
+                            let badge = feedItem.querySelector('.result-badge');
+                            if (!badge) {
+                                const verdict = feedItem.querySelector('.feed-verdict');
+                                if (verdict) {
+                                    verdict.insertAdjacentHTML('afterend', `<span class="result-badge ${status}">${status.toUpperCase()}</span>`);
+                                }
+                            } else {
+                                badge.className = `result-badge ${status}`;
+                                badge.textContent = status.toUpperCase();
+                            }
+                            // Add failure reason if failed
+                            if (!data.details.success && data.details.message) {
+                                let failureDiv = feedItem.querySelector('.failure-reason');
+                                if (!failureDiv) {
+                                    const details = feedItem.querySelector('.feed-item-details');
+                                    if (details) {
+                                        details.insertAdjacentHTML('afterend', `<div class="failure-reason">${escapeHtml(data.details.message)}</div>`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error('Error handling step event:', e);
+                }
             });
         }
 
@@ -871,6 +994,49 @@ HTML_TEMPLATE = """
             }
         }
 
+        function renderResultBadge(item) {
+            const status = item.result_status || 'pending';
+            if (status === 'pending' || !item.triggered) return '';
+            return `<span class="result-badge ${status}">${status.toUpperCase()}</span>`;
+        }
+
+        function renderFailureReason(item) {
+            if (item.result_status === 'failure' && item.result_message) {
+                return `<div class="failure-reason">${escapeHtml(item.result_message)}</div>`;
+            }
+            return '';
+        }
+
+        function renderStepsSection(item) {
+            const steps = item.steps || [];
+            const messageId = item.message_id || '';
+            if (!item.triggered) return '';
+
+            return `
+                <button class="steps-toggle" onclick="toggleSteps(this)">
+                    ${steps.length} steps ${steps.length > 0 ? '▼' : ''}
+                </button>
+                <div class="steps-container" data-message-id="${escapeHtml(messageId)}">
+                    ${steps.map(s => `
+                        <div class="step-entry">
+                            <span class="step-time">${formatTime(s.ts)}</span>
+                            <span class="step-name">${escapeHtml(s.step)}</span>
+                            <span class="step-message">${escapeHtml(s.message)}</span>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        function toggleSteps(btn) {
+            const container = btn.nextElementSibling;
+            container.classList.toggle('expanded');
+            const count = container.children.length;
+            btn.textContent = container.classList.contains('expanded')
+                ? `${count} steps ▲`
+                : `${count} steps ▼`;
+        }
+
         function addHistoryItem(item) {
             const feed = document.getElementById('activity-feed');
             const empty = document.getElementById('feed-empty');
@@ -880,6 +1046,7 @@ HTML_TEMPLATE = """
             const thisChannel = item.channel || '';
             const amazonUrls = item.amazon_urls || [];
             const productUrl = amazonUrls.length > 0 ? amazonUrls[0] : '';
+            const messageId = item.message_id || '';
 
             // Debug logging
             console.log('History item data:', {
@@ -902,7 +1069,7 @@ HTML_TEMPLATE = """
 
             let itemClass = isTriggered ? 'triggered' : 'not-triggered';
             let verdictClass = isTriggered ? 'trigger' : 'no-trigger';
-            let verdictText = isTriggered ? 'WOULD TRIGGER' : 'NO MATCH';
+            let verdictText = isTriggered ? 'MATCHED' : 'NO MATCH';
 
             const price = item.price !== undefined ? '$' + item.price.toFixed(2) : '';
             const discount = item.discount !== undefined && item.discount > 0 ? item.discount + '% off' : '';
@@ -917,9 +1084,11 @@ HTML_TEMPLATE = """
             elem.style.animation = 'none'; // No animation for history items
             elem.dataset.product = thisProduct; // Store for dedup
             elem.dataset.channel = thisChannel; // Store for per-channel dedup
+            elem.dataset.messageId = messageId; // Store for step updates
             elem.innerHTML = `
                 <div class="feed-item-header">
                     <span class="feed-verdict ${verdictClass}">${verdictText}</span>
+                    ${renderResultBadge(item)}
                     <div class="feed-item-meta">
                         ${thisChannel ? `<span class="feed-channel">${escapeHtml(thisChannel)}</span>` : ''}
                         <span class="feed-item-time">${formatTime(item.ts)}</span>
@@ -930,6 +1099,8 @@ HTML_TEMPLATE = """
                     ${price ? `<span class="feed-price">${price}</span>` : ''}
                     ${discount ? `<span class="feed-discount">${discount}</span>` : ''}
                 </div>
+                ${renderFailureReason(item)}
+                ${renderStepsSection(item)}
             `;
 
             // Add to end (items already sorted newest first)

@@ -11,9 +11,37 @@ from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
+from typing import List
 
 from app.events import event_broker, EventType, BotState
 from app.browser import browser_manager
+
+
+@dataclass
+class SellerInfo:
+    """Information about the seller/shipper for a product."""
+    ships_from: Optional[str] = None
+    sold_by: Optional[str] = None
+    raw_text: str = ""
+
+    def is_amazon_shipper(self) -> bool:
+        """Check if ships from Amazon.com (exact match only)."""
+        if not self.ships_from:
+            return False
+        return self.ships_from.strip().lower() == "amazon.com"
+
+    def is_valid_seller(self) -> bool:
+        """Check if sold by Amazon (matches Amazon.com, Amazon Resale, Amazon Warehouse, etc.)."""
+        if not self.sold_by:
+            return False
+        return "amazon" in self.sold_by.lower()
+
+
+@dataclass
+class PriceInfo:
+    """Price information extracted from page."""
+    displayed_price: Optional[float] = None
+    raw_text: str = ""
 
 # =============================================================================
 # CONFIGURABLE TIMING PARAMETERS (via environment variables)
@@ -165,6 +193,44 @@ class AmazonFlow:
             ".a-box-inner h1:has-text('Order placed')",
             "#widget-purchaseSummary",
         ],
+        # AOD Panel - No offers detection
+        "aod_no_offers": [
+            "text='No featured offers available'",
+            "#aod-pinned-offer-show-more-link-announcement",
+        ],
+        # AOD Panel - See more expansion
+        "aod_see_more": [
+            "#aod-pinned-offer-show-more-link",
+            ".aod-see-more-link",
+        ],
+        # AOD Panel - Seller info
+        "aod_ships_from": [
+            "#aod-offer-shipsFrom .a-row .a-size-small:last-child",
+            "#aod-pinned-offer .aod-ship-from span.a-size-small",
+        ],
+        "aod_sold_by": [
+            "#aod-offer-soldBy .a-row a",
+            "#aod-pinned-offer .aod-sold-by a",
+        ],
+        # AOD Panel - Price
+        "aod_price": [
+            "#aod-pinned-offer .a-price .a-offscreen",
+            ".aod-pinned-offer-price .a-offscreen",
+        ],
+        # Standard page - Seller info
+        "standard_merchant_info": [
+            "#merchant-info",
+            "#tabular-buybox",
+        ],
+        "standard_ships_sold_combined": [
+            "#merchant-info",
+        ],
+        # Standard page - Price
+        "standard_price": [
+            "#corePrice_feature_div .a-price .a-offscreen",
+            "#apex_desktop .a-price .a-offscreen",
+            ".a-price.aok-align-center .a-offscreen",
+        ],
     }
 
     # Timeouts in milliseconds (using env var values)
@@ -180,10 +246,20 @@ class AmazonFlow:
         self.confirm_final_order = confirm_final_order
         self._current_state = FlowState.IDLE
         self._current_url: Optional[str] = None
+        self._message_id: Optional[str] = None
+        self._seller_info: Optional[SellerInfo] = None
+        self._price_info: Optional[PriceInfo] = None
 
     @property
     def current_state(self) -> FlowState:
         return self._current_state
+
+    def _is_aod_url(self, url: str) -> bool:
+        """Check if URL contains aod=1 parameter."""
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        return params.get('aod', [''])[0] == '1'
 
     def _update_state(self, state: FlowState) -> None:
         """Update flow state and sync with event broker."""
@@ -252,6 +328,186 @@ class AmazonFlow:
             await asyncio.sleep(0.5)
         return None
 
+    async def _extract_seller_info_aod(self, page: Page) -> SellerInfo:
+        """Extract seller info from AOD panel."""
+        info = SellerInfo()
+
+        # Check for "No featured offers"
+        try:
+            no_offers = page.locator("text='No featured offers available'")
+            if await no_offers.is_visible(timeout=1000):
+                return SellerInfo(raw_text="No featured offers available")
+        except:
+            pass
+
+        # Try to click "See more" to expand offers
+        try:
+            see_more = page.locator("#aod-pinned-offer-show-more-link").first
+            if await see_more.is_visible(timeout=500):
+                await see_more.click()
+                await asyncio.sleep(0.5)
+        except:
+            pass
+
+        # Extract ships from / sold by
+        for selector in self.SELECTORS.get("aod_ships_from", []):
+            try:
+                elem = page.locator(selector).first
+                if await elem.is_visible(timeout=500):
+                    info.ships_from = (await elem.inner_text()).strip()
+                    break
+            except:
+                continue
+
+        for selector in self.SELECTORS.get("aod_sold_by", []):
+            try:
+                elem = page.locator(selector).first
+                if await elem.is_visible(timeout=500):
+                    info.sold_by = (await elem.inner_text()).strip()
+                    break
+            except:
+                continue
+
+        return info
+
+    async def _extract_seller_info_standard(self, page: Page) -> SellerInfo:
+        """Extract seller info from standard product page."""
+        info = SellerInfo()
+
+        # Check for combined "Ships from and sold by Amazon.com"
+        try:
+            merchant = page.locator("#merchant-info").first
+            if await merchant.is_visible(timeout=1000):
+                text = (await merchant.inner_text()).lower()
+                info.raw_text = text
+                if "ships from and sold by amazon" in text:
+                    info.ships_from = "Amazon.com"
+                    info.sold_by = "Amazon.com"
+                    return info
+        except:
+            pass
+
+        # Try tabular buybox format
+        try:
+            ships_row = page.locator("#tabular-buybox .tabular-buybox-text:has-text('Ships from')").first
+            sold_row = page.locator("#tabular-buybox .tabular-buybox-text:has-text('Sold by')").first
+
+            if await ships_row.is_visible(timeout=500):
+                info.ships_from = (await ships_row.locator("span").last.inner_text()).strip()
+            if await sold_row.is_visible(timeout=500):
+                info.sold_by = (await sold_row.locator("span, a").last.inner_text()).strip()
+        except:
+            pass
+
+        return info
+
+    async def _extract_price(self, page: Page, is_aod: bool) -> PriceInfo:
+        """Extract displayed price from page."""
+        import re
+        selectors = self.SELECTORS.get("aod_price" if is_aod else "standard_price", [])
+
+        for selector in selectors:
+            try:
+                elem = page.locator(selector).first
+                if await elem.is_visible(timeout=500):
+                    text = (await elem.inner_text()).strip()
+                    # Parse "$123.45" or "123.45" format
+                    price_match = re.search(r'\$?([\d,]+\.?\d*)', text)
+                    if price_match:
+                        return PriceInfo(
+                            displayed_price=float(price_match.group(1).replace(',', '')),
+                            raw_text=text
+                        )
+            except:
+                continue
+
+        return PriceInfo(raw_text="Price not found")
+
+    async def _log_step(self, step: str, message: str, details: Dict[str, Any] = None) -> None:
+        """Publish event and append to activity item steps."""
+        await event_broker.publish(event_broker.create_event(
+            EventType.STEP, step,
+            url=self._current_url or "",
+            details={"message_id": self._message_id, "message": message, **(details or {})}
+        ))
+
+        if self._message_id:
+            from app.activity_store import append_activity_step
+            append_activity_step(self._message_id, step, message, details)
+
+    async def _step_validate_seller(self, page: Page, is_aod: bool) -> FlowResult:
+        """Validate seller before adding to cart."""
+        await self._log_step("seller_validating", "Checking seller information...")
+
+        if is_aod:
+            seller_info = await self._extract_seller_info_aod(page)
+        else:
+            seller_info = await self._extract_seller_info_standard(page)
+
+        self._seller_info = seller_info  # Store for result tracking
+
+        # Check for "No featured offers"
+        if "no featured offers" in seller_info.raw_text.lower():
+            await self._log_step("seller_failed", "No featured offers available", {"raw_text": seller_info.raw_text})
+            return FlowResult(
+                success=False, state=FlowState.ERROR,
+                message="No featured offers available",
+                details={"seller_info": {"raw_text": seller_info.raw_text}}
+            )
+
+        # Validate shipper
+        if not seller_info.is_amazon_shipper():
+            msg = f"Invalid shipper: Ships from '{seller_info.ships_from or 'Unknown'}'"
+            await self._log_step("seller_failed", msg, {"ships_from": seller_info.ships_from, "sold_by": seller_info.sold_by})
+            return FlowResult(
+                success=False, state=FlowState.ERROR,
+                message=msg,
+                details={"ships_from": seller_info.ships_from, "sold_by": seller_info.sold_by}
+            )
+
+        # Validate seller
+        if not seller_info.is_valid_seller():
+            msg = f"Invalid seller: Sold by '{seller_info.sold_by or 'Unknown'}'"
+            await self._log_step("seller_failed", msg, {"ships_from": seller_info.ships_from, "sold_by": seller_info.sold_by})
+            return FlowResult(
+                success=False, state=FlowState.ERROR,
+                message=msg,
+                details={"ships_from": seller_info.ships_from, "sold_by": seller_info.sold_by}
+            )
+
+        await self._log_step("seller_validated", "Seller is Amazon.com", {"ships_from": seller_info.ships_from, "sold_by": seller_info.sold_by})
+
+        return FlowResult(success=True, state=FlowState.IDLE, message="Seller validated", details={})
+
+    async def _step_validate_price(self, page: Page, expected_price: float, is_aod: bool) -> FlowResult:
+        """Validate price exactly matches expected."""
+        await self._log_step("price_validating", f"Checking price matches ${expected_price:.2f}...")
+
+        price_info = await self._extract_price(page, is_aod)
+        self._price_info = price_info  # Store for result tracking
+
+        if price_info.displayed_price is None:
+            await self._log_step("price_failed", "Could not extract price from page", {"raw_text": price_info.raw_text})
+            return FlowResult(
+                success=False, state=FlowState.ERROR,
+                message="Could not extract price from page",
+                details={"raw_text": price_info.raw_text}
+            )
+
+        # EXACT match required
+        if price_info.displayed_price != expected_price:
+            msg = f"Price mismatch: ${price_info.displayed_price:.2f} vs expected ${expected_price:.2f}"
+            await self._log_step("price_failed", msg, {"displayed": price_info.displayed_price, "expected": expected_price})
+            return FlowResult(
+                success=False, state=FlowState.ERROR,
+                message=msg,
+                details={"displayed": price_info.displayed_price, "expected": expected_price}
+            )
+
+        await self._log_step("price_validated", f"Price matches ${price_info.displayed_price:.2f}", {"price": price_info.displayed_price})
+
+        return FlowResult(success=True, state=FlowState.IDLE, message="Price validated", details={})
+
     async def _handle_error(
         self,
         page: Page,
@@ -280,13 +536,14 @@ class AmazonFlow:
             )
         )
 
-    async def execute(self, url: str, message_info: Dict[str, Any] = None) -> FlowResult:
+    async def execute(self, url: str, message_info: Dict[str, Any] = None, expected_price: Optional[float] = None) -> FlowResult:
         """
         Execute the full Amazon purchase flow for a given URL.
 
         Returns FlowResult with success status and details.
         """
         self._current_url = url
+        self._message_id = message_info.get("message_id", "") if message_info else ""
         page = None
 
         event_broker.current_urls = [url]
@@ -296,14 +553,7 @@ class AmazonFlow:
             "message_info": message_info
         }
 
-        await event_broker.publish(
-            event_broker.create_event(
-                EventType.STEP,
-                "amazon_flow_start",
-                url=url,
-                details={"message_info": message_info}
-            )
-        )
+        await self._log_step("flow_started", "Starting Amazon purchase flow", {"url": url})
 
         try:
             # Start tracing for this flow
@@ -312,33 +562,58 @@ class AmazonFlow:
             # Get Amazon page
             page = await browser_manager.get_or_create_amazon_page()
 
+            # Detect flow type
+            is_aod = self._is_aod_url(url)
+            await self._log_step("url_detected", f"URL type: {'AOD' if is_aod else 'Standard'}", {"is_aod": is_aod})
+
             # Step 1: Open product page
             result = await self._step_open_product(page, url)
             if not result.success:
                 return result
+            await self._log_step("page_loaded", "Product page loaded")
 
-            # Step 2: Add to cart
+            # Step 2: Validate seller (NEW)
+            result = await self._step_validate_seller(page, is_aod)
+            if not result.success:
+                return result
+
+            # Step 3: Validate price (NEW)
+            if expected_price is not None:
+                result = await self._step_validate_price(page, expected_price, is_aod)
+                if not result.success:
+                    return result
+
+            # Step 4: Add to cart
+            await self._log_step("adding_to_cart", "Clicking Add to Cart...")
             result = await self._step_add_to_cart(page)
             if not result.success:
                 return result
+            await self._log_step("added_to_cart", "Item added to cart")
 
-            # Step 3: Wait for cart confirmation / side panel
+            # Step 5: Wait for cart confirmation / side panel
             result = await self._step_wait_cart_confirmation(page)
             if not result.success:
                 return result
+            await self._log_step("cart_confirmed", "Cart confirmation received")
 
-            # Step 4: Proceed to checkout
+            # Step 6: Proceed to checkout
+            await self._log_step("proceeding_to_checkout", "Proceeding to checkout...")
             result = await self._step_proceed_to_checkout(page)
             if not result.success:
                 return result
+            await self._log_step("on_checkout_page", "On checkout page")
 
-            # Step 5: Place order
+            # Step 7: Place order
+            await self._log_step("placing_order", "Placing order...")
             result = await self._step_place_order(page)
+            if result.success:
+                await self._log_step("order_placed", "Order placed successfully")
             return result
 
         except Exception as e:
             if page:
                 await self._handle_error(page, "flow_exception", str(e))
+            await self._log_step("flow_error", f"Flow exception: {str(e)}", {"error": str(e)})
             return FlowResult(
                 success=False,
                 state=FlowState.ERROR,
@@ -787,10 +1062,23 @@ class AmazonWorker:
 
                 url = item.get("url")
                 message_info = item.get("message")
+                parsed_data = item.get("parsed", {})
+                expected_price = parsed_data.get("price")
 
                 if url:
                     flow = AmazonFlow(confirm_final_order=self.confirm_final_order)
-                    result = await flow.execute(url, message_info)
+                    result = await flow.execute(url, message_info, expected_price=expected_price)
+
+                    # Update activity item with result
+                    message_id = message_info.get("message_id", "") if message_info else item.get("message", {}).get("message_id", "")
+                    if message_id:
+                        from app.activity_store import update_activity_result
+                        update_activity_result(
+                            message_id=message_id,
+                            result_status="success" if result.success else "failure",
+                            result_message=result.message,
+                            result_details=result.details
+                        )
 
                     # Log result
                     await event_broker.publish(
@@ -801,7 +1089,8 @@ class AmazonWorker:
                             details={
                                 "success": result.success,
                                 "state": result.state.value,
-                                "message": result.message
+                                "message": result.message,
+                                "message_id": message_id
                             }
                         )
                     )
