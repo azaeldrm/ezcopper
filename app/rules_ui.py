@@ -787,13 +787,25 @@ HTML_TEMPLATE = f"""
                 eventSource.close();
             }
 
-            eventSource = new EventSource(EVENTS_URL);
+            console.log('Attempting to connect to SSE:', EVENTS_URL);
+
+            try {
+                eventSource = new EventSource(EVENTS_URL);
+                console.log('EventSource created successfully');
+            } catch (error) {
+                console.error('Failed to create EventSource:', error);
+                setConnectionStatus(false);
+                setTimeout(connectSSE, 5000);
+                return;
+            }
 
             eventSource.onopen = () => {
+                console.log('SSE connection opened');
                 setConnectionStatus(true);
             };
 
-            eventSource.onerror = () => {
+            eventSource.onerror = (error) => {
+                console.error('SSE connection error:', error, 'ReadyState:', eventSource.readyState);
                 setConnectionStatus(false);
                 // Reconnect after 5 seconds
                 setTimeout(connectSSE, 5000);
