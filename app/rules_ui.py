@@ -554,6 +554,32 @@ HTML_TEMPLATE = """
         .step-time { color: #666; min-width: 70px; }
         .step-name { color: #00d4ff; min-width: 120px; }
         .step-message { color: #aaa; flex: 1; }
+        /* Trigger Button */
+        .btn-trigger {
+            background: transparent;
+            border: 1px solid #00d4ff;
+            color: #00d4ff;
+            padding: 4px 12px;
+            font-size: 0.75em;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-left: 8px;
+            transition: all 0.2s;
+        }
+        .btn-trigger:hover {
+            background: #00d4ff;
+            color: #000;
+        }
+        .btn-trigger:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            border-color: #666;
+            color: #666;
+        }
+        .btn-trigger:disabled:hover {
+            background: transparent;
+            color: #666;
+        }
     </style>
 </head>
 <body>
@@ -816,6 +842,15 @@ HTML_TEMPLATE = """
                 <div class="steps-container" data-message-id="${escapeHtml(messageId)}"></div>
             ` : '';
 
+            // Create item object for helper functions
+            const itemData = {
+                triggered: isTriggered,
+                amazon_urls: amazonUrls,
+                price: details.price,
+                product: product,
+                message_id: messageId
+            };
+
             const item = document.createElement('div');
             item.className = 'feed-item ' + itemClass;
             item.dataset.product = product.substring(0, 100); // Store for dedup
@@ -824,6 +859,7 @@ HTML_TEMPLATE = """
             item.innerHTML = `
                 <div class="feed-item-header">
                     <span class="feed-verdict ${verdictClass}">${verdictText}</span>
+                    ${renderTriggerButton(itemData)}
                     <div class="feed-item-meta">
                         ${channel ? `<span class="feed-channel">${escapeHtml(channel)}</span>` : ''}
                         <span class="feed-item-time">${formatTime(data.ts)}</span>
@@ -994,6 +1030,58 @@ HTML_TEMPLATE = """
             }
         }
 
+        async function triggerFlow(messageId, url, price, product) {
+            const button = event.target;
+            button.disabled = true;
+            button.textContent = 'Triggering...';
+
+            try {
+                const response = await fetch('/actions/trigger', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        url: url,
+                        price: price,
+                        message_id: messageId,
+                        product: product
+                    })
+                });
+
+                if (response.ok) {
+                    button.textContent = 'Triggered ✓';
+                    setTimeout(() => {
+                        button.textContent = 'Trigger Flow';
+                        button.disabled = false;
+                    }, 3000);
+                } else {
+                    button.textContent = 'Failed ✗';
+                    setTimeout(() => {
+                        button.textContent = 'Trigger Flow';
+                        button.disabled = false;
+                    }, 3000);
+                }
+            } catch (error) {
+                console.error('Trigger failed:', error);
+                button.textContent = 'Error';
+                setTimeout(() => {
+                    button.textContent = 'Trigger Flow';
+                    button.disabled = false;
+                }, 3000);
+            }
+        }
+
+        function renderTriggerButton(item) {
+            // Only show trigger button for matched items with Amazon URLs
+            if (!item.triggered || !item.amazon_urls || item.amazon_urls.length === 0) {
+                return '';
+            }
+            const url = item.amazon_urls[0];
+            const price = item.price || 0;
+            const product = (item.product || '').replace(/'/g, "\\'");
+            const messageId = (item.message_id || '').replace(/'/g, "\\'");
+            return `<button class="btn-trigger" onclick="triggerFlow('${messageId}', '${url}', ${price}, '${product}')">Trigger Flow</button>`;
+        }
+
         function renderResultBadge(item) {
             const status = item.result_status || 'pending';
             if (status === 'pending' || !item.triggered) return '';
@@ -1089,6 +1177,7 @@ HTML_TEMPLATE = """
                 <div class="feed-item-header">
                     <span class="feed-verdict ${verdictClass}">${verdictText}</span>
                     ${renderResultBadge(item)}
+                    ${renderTriggerButton(item)}
                     <div class="feed-item-meta">
                         ${thisChannel ? `<span class="feed-channel">${escapeHtml(thisChannel)}</span>` : ''}
                         <span class="feed-item-time">${formatTime(item.ts)}</span>
