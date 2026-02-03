@@ -206,11 +206,18 @@ class AmazonFlow:
         # AOD Panel - Seller info
         "aod_ships_from": [
             "#aod-offer-shipsFrom .a-row .a-size-small:last-child",
+            "#aod-offer-shipsFrom span:last-child",
             "#aod-pinned-offer .aod-ship-from span.a-size-small",
+            "div:has-text('Ships from') + div",
+            "[id*='shipFrom'] span",
         ],
         "aod_sold_by": [
             "#aod-offer-soldBy .a-row a",
+            "#aod-offer-soldBy a",
             "#aod-pinned-offer .aod-sold-by a",
+            "div:has-text('Sold by') + div a",
+            "div:has-text('Sold by') + div",
+            "[id*='soldBy'] a",
         ],
         # AOD Panel - Price
         "aod_price": [
@@ -355,6 +362,7 @@ class AmazonFlow:
                 elem = page.locator(selector).first
                 if await elem.is_visible(timeout=500):
                     info.ships_from = (await elem.inner_text()).strip()
+                    await self._log_step("debug_ships_from", f"Found ships_from: '{info.ships_from}' using selector: {selector}")
                     break
             except:
                 continue
@@ -364,6 +372,7 @@ class AmazonFlow:
                 elem = page.locator(selector).first
                 if await elem.is_visible(timeout=500):
                     info.sold_by = (await elem.inner_text()).strip()
+                    await self._log_step("debug_sold_by", f"Found sold_by: '{info.sold_by}' using selector: {selector}")
                     break
             except:
                 continue
@@ -390,6 +399,13 @@ class AmazonFlow:
                         info.raw_text = text
             except:
                 pass
+
+        # Debug log final extraction
+        await self._log_step("debug_aod_final", f"AOD extraction complete", {
+            "ships_from": info.ships_from,
+            "sold_by": info.sold_by,
+            "raw_text": info.raw_text
+        })
 
         return info
 
@@ -450,10 +466,19 @@ class AmazonFlow:
 
             if await ships_row.is_visible(timeout=500):
                 info.ships_from = (await ships_row.locator("span").last.inner_text()).strip()
+                await self._log_step("debug_ships_from", f"Found ships_from: '{info.ships_from}' using tabular buybox")
             if await sold_row.is_visible(timeout=500):
                 info.sold_by = (await sold_row.locator("span, a").last.inner_text()).strip()
+                await self._log_step("debug_sold_by", f"Found sold_by: '{info.sold_by}' using tabular buybox")
         except:
             pass
+
+        # Debug log final extraction
+        await self._log_step("debug_standard_final", f"Standard extraction complete", {
+            "ships_from": info.ships_from,
+            "sold_by": info.sold_by,
+            "raw_text": info.raw_text
+        })
 
         return info
 
