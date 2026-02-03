@@ -4,6 +4,7 @@ Runs on port 8001.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import List
 from dataclasses import dataclass, asdict
@@ -16,6 +17,7 @@ from app.activity_store import load_activity
 
 
 RULES_FILE = Path("/data/rules.json")
+MAX_FEED_ITEMS = int(os.getenv("MAX_FEED_ITEMS", "50"))
 
 
 @dataclass
@@ -76,7 +78,7 @@ def get_blacklist_rules() -> List[Rule]:
 rules_app = FastAPI(title="Purchase Rules Manager")
 
 
-HTML_TEMPLATE = """
+HTML_TEMPLATE = f"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -560,9 +562,9 @@ HTML_TEMPLATE = """
 
     <script>
         const API_BASE = '';
-        const EVENTS_URL = window.location.protocol + '//' + window.location.hostname + ':8000/events';
+        const EVENTS_URL = '/events';
         let eventSource = null;
-        const MAX_FEED_ITEMS = 50;
+        const MAX_FEED_ITEMS = {MAX_FEED_ITEMS};
 
         // Rules Management
         let currentRuleType = 'blacklist';
