@@ -78,8 +78,9 @@ def get_blacklist_rules() -> List[Rule]:
 # Create FastAPI app for rules UI
 rules_app = FastAPI(title="Purchase Rules Manager")
 
-# Mount static files directory
+# Mount static files directory (create if it doesn't exist)
 static_dir = Path(__file__).parent / "static"
+static_dir.mkdir(parents=True, exist_ok=True)
 rules_app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
