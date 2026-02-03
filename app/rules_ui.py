@@ -78,7 +78,7 @@ def get_blacklist_rules() -> List[Rule]:
 rules_app = FastAPI(title="Purchase Rules Manager")
 
 
-HTML_TEMPLATE = f"""
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -564,7 +564,7 @@ HTML_TEMPLATE = f"""
         const API_BASE = '';
         const EVENTS_URL = '/events';
         let eventSource = null;
-        const MAX_FEED_ITEMS = {MAX_FEED_ITEMS};
+        const MAX_FEED_ITEMS = __MAX_FEED_ITEMS__;
 
         // Rules Management
         let currentRuleType = 'blacklist';
@@ -939,7 +939,7 @@ HTML_TEMPLATE = f"""
 @rules_app.get("/", response_class=HTMLResponse)
 async def rules_ui():
     """Serve the rules management UI."""
-    return HTML_TEMPLATE
+    return HTML_TEMPLATE.replace("__MAX_FEED_ITEMS__", str(MAX_FEED_ITEMS))
 
 
 @rules_app.get("/api/rules")
