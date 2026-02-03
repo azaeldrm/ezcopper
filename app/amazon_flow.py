@@ -493,14 +493,34 @@ class AmazonFlow:
 
             await self._log_step("debug_data_lines", f"Extracted data lines: {data_lines}")
 
-            # If we found exactly one data line and it contains Amazon, that's our seller
+            # Look for seller name in data lines
+            # The pattern is: "Shipper / Seller" label followed by the seller name
+            # Data lines should contain the seller name after filtering out labels
             if len(data_lines) >= 1:
-                amazon_lines = [line for line in data_lines if 'amazon' in line.lower()]
-                if amazon_lines:
-                    # All amazon mentions are the same seller
-                    info.ships_from = "Amazon.com"
-                    info.sold_by = "Amazon.com"
-                    await self._log_step("debug_pattern_match", f"Matched pattern: Found Amazon in data lines: {amazon_lines}")
+                # Find the first line that looks like a seller name (not a number, not too short)
+                seller_name = None
+                for line in data_lines:
+                    # Skip numeric lines, very short lines, and common non-seller text
+                    if line.isdigit() or len(line) < 3:
+                        continue
+                    if any(word in line.lower() for word in ['refund', 'replacement', 'add to list']):
+                        continue
+                    # This looks like a seller name
+                    seller_name = line
+                    break
+
+                if seller_name:
+                    await self._log_step("debug_seller_name_found", f"Found seller name: {seller_name}")
+                    # Check if it's Amazon
+                    if 'amazon' in seller_name.lower():
+                        info.ships_from = "Amazon.com"
+                        info.sold_by = "Amazon.com"
+                        await self._log_step("debug_pattern_match", f"Matched pattern: Amazon seller found: {seller_name}")
+                    else:
+                        # It's a third-party seller
+                        info.ships_from = seller_name
+                        info.sold_by = seller_name
+                        await self._log_step("debug_pattern_match", f"Found third-party seller: {seller_name}")
                     return info
 
         # Try tabular buybox format
