@@ -1024,7 +1024,6 @@ class AmazonFlow:
             result = await self._step_open_product(page, url)
             if not result.success:
                 return result
-            await self._log_step("page_loaded", "Product page loaded")
 
             # Step 2: Check product availability
             if await self._check_currently_unavailable(page):
