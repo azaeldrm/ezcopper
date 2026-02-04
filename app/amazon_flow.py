@@ -506,7 +506,38 @@ class AmazonFlow:
         """Extract seller info from standard product page."""
         info = SellerInfo()
 
-        # Try multiple buybox container selectors
+        # =================================================================
+        # PRIORITY 1: Try specific seller element selectors first
+        # =================================================================
+        # Look for seller link directly (most reliable when present)
+        seller_link_selectors = [
+            "#sellerProfileTriggerId",  # Seller profile link
+            "a[href*='/seller/']",  # Any seller link
+            "#tabular-buybox a[href*='/seller/']",  # Tabular buybox seller link
+            "#desktop_buybox a[href*='/seller/']",  # Desktop buybox seller link
+        ]
+
+        for selector in seller_link_selectors:
+            try:
+                elem = page.locator(selector).first
+                if await elem.is_visible(timeout=300):
+                    seller_name = (await elem.inner_text()).strip()
+                    if seller_name and len(seller_name) > 1:
+                        await self._log_step("debug_seller_link_found", f"Found seller via link: {seller_name}", {"selector": selector})
+                        # If we found seller via link, assume ships_from is same unless we find otherwise
+                        info.sold_by = seller_name
+                        info.ships_from = seller_name
+                        if 'amazon' in seller_name.lower():
+                            info.ships_from = "Amazon.com"
+                            info.sold_by = "Amazon.com"
+                        info.raw_text = f"Seller link: {seller_name}"
+                        return info
+            except:
+                continue
+
+        # =================================================================
+        # PRIORITY 2: Try buybox text parsing as fallback
+        # =================================================================
         buybox_selectors = [
             "#merchant-info",
             "#desktop_buybox",
@@ -552,15 +583,21 @@ class AmazonFlow:
                             'service', 'see more', 'free', 'prime', 'deliver to', 'available',
                             'ship', 'payment', 'secure', 'transaction', 'protection', 'plan']
 
+            # Additional non-seller keywords to filter out
+            non_seller_keywords = ['in stock', 'out of stock', 'only', 'left', 'order soon',
+                                   'refund', 'replacement', 'add to list', 'gift', 'qty', 'details']
+
             data_lines = []
             for line in lines:
                 line_lower = line.lower()
                 # Skip if it's a label or contains special chars suggesting it's a label
                 is_label = any(label in line_lower for label in label_keywords)
+                is_non_seller = any(kw in line_lower for kw in non_seller_keywords)
                 is_price = '$' in line or any(c.isdigit() for c in line) and '.' in line
                 is_short_price = line_lower in ['.', '..', '...']
+                is_pure_number = line.isdigit()  # Skip quantity numbers like "1", "2", etc.
 
-                if not is_label and not is_short_price:
+                if not is_label and not is_short_price and not is_non_seller and not is_pure_number:
                     # Keep this line if it looks like actual data
                     # But skip pure price lines like "$967.64"
                     if is_price and len(line.replace('$', '').replace('.', '').replace(',', '').strip()) > 0:
@@ -750,10 +787,66 @@ class AmazonFlow:
                 continue
         return False
 
+    async def _extract_aod_offer_info(self, offer_element, offer_name: str) -> tuple[Optional[str], Optional[str]]:
+        """Extract ships_from and sold_by from an AOD offer element."""
+        ships_from = None
+        sold_by = None
+
+        # Try to get ships from
+        try:
+            # Look for ships-from container within this offer
+            ships_container = offer_element.locator("[id*='shipsFrom'], .aod-ship-from").first
+            if await ships_container.is_visible(timeout=300):
+                text = (await ships_container.inner_text()).strip()
+                lines = [l.strip() for l in text.split('\n') if l.strip()]
+                for line in lines:
+                    if 'ships from' in line.lower():
+                        continue
+                    ships_from = line
+                    break
+        except:
+            pass
+
+        # Try to get sold by
+        try:
+            # First try to find seller link
+            sold_link = offer_element.locator("[id*='soldBy'] a, .aod-sold-by a").first
+            if await sold_link.is_visible(timeout=300):
+                sold_by = (await sold_link.inner_text()).strip()
+            else:
+                # Fallback: get text container
+                sold_text_elem = offer_element.locator("[id*='soldBy'], .aod-sold-by").first
+                if await sold_text_elem.is_visible(timeout=300):
+                    text = (await sold_text_elem.inner_text()).strip()
+                    lines = [line.strip() for line in text.split('\n') if line.strip()]
+                    for line in lines:
+                        if 'sold by' in line.lower() or 'rating' in line.lower() or '%' in line:
+                            continue
+                        sold_by = line
+                        break
+        except:
+            pass
+
+        return ships_from, sold_by
+
+    def _is_valid_amazon_offer(self, ships_from: Optional[str], sold_by: Optional[str]) -> bool:
+        """Check if offer is from valid Amazon seller."""
+        is_valid_shipper = ships_from and ships_from.strip().lower() == "amazon.com"
+        is_valid_seller = sold_by and any(
+            keyword in sold_by.lower()
+            for keyword in ["amazon.com", "amazon resale", "amazon warehouse"]
+        )
+        return is_valid_shipper and is_valid_seller
+
     async def _find_valid_amazon_offer_in_aod(self, page: Page) -> Optional[Dict[str, Any]]:
         """
         Traverse AOD offers to find first valid Amazon offer.
         Valid = Ships from Amazon.com AND (Sold by Amazon.com OR Amazon Resale OR Amazon Warehouse)
+
+        Checks in order:
+        1. Pinned offer (featured offer at top)
+        2. Offer list (additional offers below)
+
         Returns dict with offer info if found, None otherwise.
         """
         await self._log_step("aod_traversing", "Searching AOD offers for valid Amazon seller...")
@@ -767,72 +860,74 @@ class AmazonFlow:
         except:
             pass
 
+        # =================================================================
+        # STEP 1: Check the PINNED OFFER first (featured offer at top)
+        # =================================================================
+        try:
+            pinned_offer = page.locator("#aod-pinned-offer").first
+            if await pinned_offer.is_visible(timeout=1000):
+                await self._log_step("aod_checking_pinned", "Checking pinned offer...")
+
+                ships_from, sold_by = await self._extract_aod_offer_info(pinned_offer, "pinned")
+
+                await self._log_step("aod_pinned_checked", f"Pinned offer: Ships from '{ships_from}', Sold by '{sold_by}'", {
+                    "offer_type": "pinned",
+                    "ships_from": ships_from,
+                    "sold_by": sold_by
+                })
+
+                if self._is_valid_amazon_offer(ships_from, sold_by):
+                    await self._log_step("aod_valid_offer_found", "Valid Amazon offer found in pinned offer", {
+                        "ships_from": ships_from,
+                        "sold_by": sold_by,
+                        "offer_type": "pinned"
+                    })
+
+                    # Find Add to Cart button in pinned offer
+                    add_button = pinned_offer.locator("input[name='submit.addToCart'], .a-button-input").first
+                    if await add_button.is_visible(timeout=500):
+                        await self._log_step("aod_selecting_offer", "Selecting pinned offer")
+                        self._seller_info = SellerInfo(
+                            ships_from=ships_from,
+                            sold_by=sold_by,
+                            raw_text=f"Ships from {ships_from}, Sold by {sold_by}"
+                        )
+                        return {
+                            "offer_index": "pinned",
+                            "ships_from": ships_from,
+                            "sold_by": sold_by,
+                            "add_button": add_button
+                        }
+                else:
+                    await self._log_step("aod_pinned_invalid", f"Pinned offer not valid Amazon seller, checking offer list...")
+        except Exception as e:
+            await self._log_step("aod_pinned_error", f"Error checking pinned offer: {str(e)}")
+
+        # =================================================================
+        # STEP 2: Check the OFFER LIST (additional offers below)
+        # =================================================================
         # Try to expand "See more" if available
         try:
             see_more = page.locator("#aod-pinned-offer-show-more-link").first
             if await see_more.is_visible(timeout=500):
                 await see_more.click()
-                # Event-driven wait: Wait for expanded content (offer cards)
                 try:
                     await page.locator("#aod-offer").first.wait_for(state="visible", timeout=2000)
                 except:
-                    pass  # Continue even if timeout
+                    pass
         except:
             pass
 
-        # Get all offer cards
+        # Get all offer cards in the list
         offer_cards = page.locator("#aod-offer")
         count = await offer_cards.count()
-        await self._log_step("aod_offers_found", f"Found {count} offers in AOD", {"count": count})
+        await self._log_step("aod_offers_found", f"Found {count} offers in offer list", {"count": count})
 
-        # Traverse each offer
+        # Traverse each offer in the list
         for i in range(count):
             offer = offer_cards.nth(i)
 
-            # Extract seller info from this offer
-            ships_from = None
-            sold_by = None
-
-            # Try to get ships from
-            try:
-                # Get all text in the ships-from section and parse it
-                ships_container = offer.locator("#aod-offer-shipsFrom").first
-                if await ships_container.is_visible(timeout=300):
-                    text = (await ships_container.inner_text()).strip()
-                    # Format is usually "Ships from\nAmazon.com" or similar
-                    lines = [l.strip() for l in text.split('\n') if l.strip()]
-                    for line in lines:
-                        # Skip the label line
-                        if 'ships from' in line.lower():
-                            continue
-                        # This should be the shipper name
-                        ships_from = line
-                        break
-            except:
-                pass
-
-            # Try to get sold by - prioritize link (seller name) over rating text
-            try:
-                # First try to find seller link
-                sold_link = offer.locator("#aod-offer-soldBy a[href*='seller']").first
-                if await sold_link.is_visible(timeout=300):
-                    sold_by = (await sold_link.inner_text()).strip()
-                else:
-                    # Fallback: get text but filter out rating patterns
-                    sold_text_elem = offer.locator("#aod-offer-soldBy").first
-                    if await sold_text_elem.is_visible(timeout=300):
-                        text = (await sold_text_elem.inner_text()).strip()
-                        # Remove "Sold by" label and rating info
-                        lines = [line.strip() for line in text.split('\n') if line.strip()]
-                        for line in lines:
-                            # Skip label and rating lines
-                            if 'sold by' in line.lower() or 'rating' in line.lower() or '%' in line:
-                                continue
-                            # This should be the seller name
-                            sold_by = line
-                            break
-            except:
-                pass
+            ships_from, sold_by = await self._extract_aod_offer_info(offer, f"offer_{i}")
 
             await self._log_step("aod_offer_checked", f"Offer {i+1}: Ships from '{ships_from}', Sold by '{sold_by}'", {
                 "offer_index": i,
@@ -840,26 +935,18 @@ class AmazonFlow:
                 "sold_by": sold_by
             })
 
-            # Validate this offer
-            is_valid_shipper = ships_from and ships_from.strip().lower() == "amazon.com"
-            is_valid_seller = sold_by and any(
-                keyword in sold_by.lower()
-                for keyword in ["amazon.com", "amazon resale", "amazon warehouse"]
-            )
-
-            if is_valid_shipper and is_valid_seller:
+            if self._is_valid_amazon_offer(ships_from, sold_by):
                 await self._log_step("aod_valid_offer_found", f"Valid Amazon offer found at index {i}", {
                     "ships_from": ships_from,
                     "sold_by": sold_by,
                     "offer_index": i
                 })
 
-                # Try to click "Add to Cart" or select button for this offer
+                # Try to click "Add to Cart" button for this offer
                 try:
                     add_button = offer.locator("input[name='submit.addToCart'], .a-button-input").first
                     if await add_button.is_visible(timeout=500):
                         await self._log_step("aod_selecting_offer", f"Selecting offer {i}")
-                        # Store seller info for validation tracking
                         self._seller_info = SellerInfo(
                             ships_from=ships_from,
                             sold_by=sold_by,
