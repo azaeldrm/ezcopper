@@ -910,47 +910,85 @@ class AmazonFlow:
             if await pinned_offer.is_visible(timeout=1000):
                 await self._log_step("aod_checking_pinned", "Checking pinned offer...")
 
-                # Extract seller info directly from page (not scoped to pinned_offer)
-                # The elements are inside #aod-pinned-offer-additional-content
+                # Extract seller info from the pinned offer section
+                # Elements are in #aod-pinned-offer-additional-content
                 ships_from = None
                 sold_by = None
 
-                # Get ships_from - try multiple approaches
+                # Try to find the pinned offer additional content container
+                pinned_container = page.locator("#aod-pinned-offer-additional-content, #aod-pinned-offer").first
+
+                # Get ships_from
                 ships_selectors = [
                     "#aod-offer-shipsFrom .a-col-right span.a-color-base",
                     "#aod-offer-shipsFrom .a-col-right span",
                     "#aod-offer-shipsFrom .a-col-right",
+                    "#aod-offer-shipsFrom",
                 ]
                 for sel in ships_selectors:
                     if ships_from:
                         break
                     try:
-                        elem = page.locator(sel).first
-                        if await elem.is_visible(timeout=300):
+                        # Try within pinned container first
+                        elem = pinned_container.locator(sel).first
+                        if await elem.is_visible(timeout=200):
                             text = (await elem.inner_text()).strip()
-                            if text and 'ships from' not in text.lower():
-                                ships_from = text
+                            # Parse out the value (skip "Ships from" label)
+                            lines = [l.strip() for l in text.split('\n') if l.strip()]
+                            for line in lines:
+                                if 'ships from' not in line.lower() and len(line) > 1:
+                                    ships_from = line
+                                    break
+                            if ships_from:
                                 break
+                    except:
+                        pass
+                    try:
+                        # Fallback: try on page directly
+                        elem = page.locator(sel).first
+                        if await elem.is_visible(timeout=200):
+                            text = (await elem.inner_text()).strip()
+                            lines = [l.strip() for l in text.split('\n') if l.strip()]
+                            for line in lines:
+                                if 'ships from' not in line.lower() and len(line) > 1:
+                                    ships_from = line
+                                    break
                     except:
                         continue
 
-                # Get sold_by - try multiple approaches
+                # Get sold_by
                 sold_selectors = [
                     "#aod-offer-soldBy .a-col-right a",
-                    "#aod-offer-soldBy .a-col-right span.a-color-base",
                     "#aod-offer-soldBy .a-col-right span",
                     "#aod-offer-soldBy .a-col-right",
+                    "#aod-offer-soldBy a",
+                    "#aod-offer-soldBy",
                 ]
                 for sel in sold_selectors:
                     if sold_by:
                         break
                     try:
-                        elem = page.locator(sel).first
-                        if await elem.is_visible(timeout=300):
+                        elem = pinned_container.locator(sel).first
+                        if await elem.is_visible(timeout=200):
                             text = (await elem.inner_text()).strip()
-                            if text and 'sold by' not in text.lower():
-                                sold_by = text
+                            lines = [l.strip() for l in text.split('\n') if l.strip()]
+                            for line in lines:
+                                if 'sold by' not in line.lower() and len(line) > 1:
+                                    sold_by = line
+                                    break
+                            if sold_by:
                                 break
+                    except:
+                        pass
+                    try:
+                        elem = page.locator(sel).first
+                        if await elem.is_visible(timeout=200):
+                            text = (await elem.inner_text()).strip()
+                            lines = [l.strip() for l in text.split('\n') if l.strip()]
+                            for line in lines:
+                                if 'sold by' not in line.lower() and len(line) > 1:
+                                    sold_by = line
+                                    break
                     except:
                         continue
 
