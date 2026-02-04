@@ -918,7 +918,46 @@ class AmazonFlow:
                 # Try to find the pinned offer additional content container
                 pinned_container = page.locator("#aod-pinned-offer-additional-content, #aod-pinned-offer").first
 
-                # Wait for the seller info elements to load (they appear after AOD panel loads)
+                # COMPREHENSIVE DEBUG: Understand what Playwright sees
+                await self._log_step("debug_page_url", f"Current page URL: {page.url}")
+
+                # Check for iframes
+                try:
+                    iframes = page.frames
+                    await self._log_step("debug_frames", f"Page has {len(iframes)} frames: {[f.url for f in iframes]}")
+                except Exception as e:
+                    await self._log_step("debug_frames", f"Error checking frames: {str(e)}")
+
+                # Check if #aod-pinned-offer is visible and get its HTML
+                try:
+                    pinned = page.locator("#aod-pinned-offer").first
+                    if await pinned.is_visible(timeout=1000):
+                        pinned_html = await pinned.inner_html()
+                        await self._log_step("debug_pinned_html", f"#aod-pinned-offer HTML (first 500 chars): {pinned_html[:500]}")
+                    else:
+                        await self._log_step("debug_pinned_html", "#aod-pinned-offer NOT visible")
+                except Exception as e:
+                    await self._log_step("debug_pinned_html", f"Error getting pinned HTML: {str(e)}")
+
+                # Check #aod-pinned-offer-additional-content
+                try:
+                    additional = page.locator("#aod-pinned-offer-additional-content").first
+                    if await additional.is_visible(timeout=1000):
+                        add_html = await additional.inner_html()
+                        await self._log_step("debug_additional_html", f"#aod-pinned-offer-additional-content HTML (first 500 chars): {add_html[:500]}")
+                    else:
+                        await self._log_step("debug_additional_html", "#aod-pinned-offer-additional-content NOT visible")
+                except Exception as e:
+                    await self._log_step("debug_additional_html", f"Error: {str(e)}")
+
+                # Check for #aod-offer-shipsFrom anywhere on page
+                try:
+                    ships_count = await page.locator("#aod-offer-shipsFrom").count()
+                    await self._log_step("debug_ships_count", f"Found {ships_count} elements with #aod-offer-shipsFrom")
+                except Exception as e:
+                    await self._log_step("debug_ships_count", f"Error counting: {str(e)}")
+
+                # Try waiting for the element
                 try:
                     ships_elem_direct = page.locator("#aod-offer-shipsFrom").first
                     await ships_elem_direct.wait_for(state="visible", timeout=5000)
