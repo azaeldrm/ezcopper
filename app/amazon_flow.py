@@ -957,14 +957,52 @@ class AmazonFlow:
                 except Exception as e:
                     await self._log_step("debug_ships_count", f"Error counting: {str(e)}")
 
-                # Try waiting for the element
+                # Try clicking on pinned offer to expand it
                 try:
-                    ships_elem_direct = page.locator("#aod-offer-shipsFrom").first
-                    await ships_elem_direct.wait_for(state="visible", timeout=5000)
-                    debug_text = await ships_elem_direct.inner_text()
-                    await self._log_step("debug_ships_element", f"Found #aod-offer-shipsFrom: {debug_text[:100]}")
+                    # Look for expand button or clickable area
+                    expand_selectors = [
+                        "#aod-pinned-offer-show-more-link",
+                        "#aod-pinned-offer .a-link-normal",
+                        "#aod-pinned-offer",
+                    ]
+                    for sel in expand_selectors:
+                        try:
+                            expand_elem = page.locator(sel).first
+                            if await expand_elem.is_visible(timeout=500):
+                                await expand_elem.click()
+                                await self._log_step("debug_clicked_expand", f"Clicked {sel} to expand")
+                                await asyncio.sleep(1)  # Wait for expansion
+                                break
+                        except:
+                            continue
                 except Exception as e:
-                    await self._log_step("debug_ships_element", f"#aod-offer-shipsFrom not found after wait: {str(e)}")
+                    await self._log_step("debug_expand_error", f"Error trying to expand: {str(e)}")
+
+                # Check again after potential expansion
+                try:
+                    additional_after = page.locator("#aod-pinned-offer-additional-content").first
+                    if await additional_after.is_visible(timeout=1000):
+                        await self._log_step("debug_additional_now_visible", "Additional content now visible!")
+                    else:
+                        await self._log_step("debug_additional_still_hidden", "Additional content still hidden")
+                except:
+                    pass
+
+                # Try getting element text even if not "visible" (use evaluate for hidden elements)
+                try:
+                    ships_text = await page.locator("#aod-offer-shipsFrom").first.inner_text(timeout=2000)
+                    await self._log_step("debug_ships_innertext", f"Got ships text via inner_text: '{ships_text}'")
+                except Exception as e:
+                    await self._log_step("debug_ships_innertext", f"inner_text failed: {str(e)}")
+
+                # Try JavaScript evaluation to get text
+                try:
+                    js_ships = await page.evaluate("document.querySelector('#aod-offer-shipsFrom')?.innerText || 'NOT FOUND'")
+                    await self._log_step("debug_ships_js", f"JS eval ships: '{js_ships}'")
+                    js_sold = await page.evaluate("document.querySelector('#aod-offer-soldBy')?.innerText || 'NOT FOUND'")
+                    await self._log_step("debug_sold_js", f"JS eval sold: '{js_sold}'")
+                except Exception as e:
+                    await self._log_step("debug_js_error", f"JS eval error: {str(e)}")
 
                 # Get ships_from - element should be visible now after wait
                 try:
