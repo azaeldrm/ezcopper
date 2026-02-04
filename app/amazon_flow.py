@@ -387,8 +387,8 @@ class AmazonFlow:
         state: str = "visible"
     ) -> Optional[str]:
         """
-        Event-driven wait using Playwright's native wait_for().
-        Proceeds immediately when element appears - no polling delays.
+        Event-driven wait - races multiple selectors in parallel.
+        Returns immediately when ANY selector becomes visible.
 
         Args:
             page: Playwright page
@@ -403,23 +403,43 @@ class AmazonFlow:
         if not selectors:
             return None
 
-        # Create a combined selector using CSS :is() or try each one
-        # Playwright's locator can handle multiple options with 'or'
-        combined_selector = ", ".join(selectors)
+        async def wait_for_selector(selector: str) -> Optional[str]:
+            """Wait for a single selector and return it if found."""
+            try:
+                locator = page.locator(selector).first
+                await locator.wait_for(state=state, timeout=timeout)
+                return selector
+            except:
+                return None
 
+        # Race all selectors - first one to appear wins
         try:
-            locator = page.locator(combined_selector).first
-            await locator.wait_for(state=state, timeout=timeout)
+            tasks = [asyncio.create_task(wait_for_selector(s)) for s in selectors]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
-            # Find which specific selector matched for logging
-            for selector in selectors:
-                try:
-                    if await page.locator(selector).first.is_visible(timeout=100):
-                        return selector
-                except:
-                    continue
-            return combined_selector
-        except PlaywrightTimeout:
+            # Cancel remaining tasks
+            for task in pending:
+                task.cancel()
+
+            # Get result from completed task
+            for task in done:
+                result = task.result()
+                if result:
+                    return result
+
+            # If first completed returned None, wait briefly for others
+            if pending:
+                done2, pending2 = await asyncio.wait(pending, timeout=0.5)
+                for task in pending2:
+                    task.cancel()
+                for task in done2:
+                    try:
+                        result = task.result()
+                        if result:
+                            return result
+                    except:
+                        pass
+
             return None
         except Exception:
             return None
@@ -1248,10 +1268,10 @@ class AmazonFlow:
 
         for attempt in range(MAX_RETRIES):
             try:
-                # Navigate to URL
+                # Navigate to URL (default wait_until="load")
                 await page.goto(url, timeout=self.TIMEOUTS["page_load"])
 
-                # Event-driven wait: Wait for buybox elements to appear (acts immediately when ready)
+                # Wait for buybox elements OR use short fallback
                 ready_selector = await self._wait_for_element(
                     page, "buybox_ready", timeout=TIMEOUT_MS_BUYBOX_READY
                 )
@@ -1265,9 +1285,8 @@ class AmazonFlow:
                             details={"ready_selector": ready_selector}
                         )
                     )
-                else:
-                    # Fallback: short fixed wait if no buybox detected (page might have different layout)
-                    await asyncio.sleep(1.0)
+                # Always do a brief wait for any remaining JS to settle
+                await asyncio.sleep(0.5)
 
                 # Check if we landed on a product page
                 if "amazon.com" in page.url or "amzn" in page.url:
