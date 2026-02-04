@@ -918,6 +918,17 @@ class AmazonFlow:
                 # Try to find the pinned offer additional content container
                 pinned_container = page.locator("#aod-pinned-offer-additional-content, #aod-pinned-offer").first
 
+                # DEBUG: Log what we can see
+                try:
+                    ships_elem_direct = page.locator("#aod-offer-shipsFrom").first
+                    if await ships_elem_direct.is_visible(timeout=500):
+                        debug_text = await ships_elem_direct.inner_text()
+                        await self._log_step("debug_ships_element", f"Found #aod-offer-shipsFrom with text: {debug_text[:100]}")
+                    else:
+                        await self._log_step("debug_ships_element", "#aod-offer-shipsFrom NOT visible")
+                except Exception as e:
+                    await self._log_step("debug_ships_element", f"Error finding #aod-offer-shipsFrom: {str(e)}")
+
                 # Get ships_from
                 ships_selectors = [
                     "#aod-offer-shipsFrom .a-col-right span.a-color-base",
