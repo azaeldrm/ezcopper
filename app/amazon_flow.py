@@ -241,10 +241,33 @@ class AmazonFlow:
             "div:has-text('Sold by') + div",
             "[id*='soldBy'] a",
         ],
-        # AOD Panel - Price
+        # AOD Panel - Price (comprehensive selectors for various AOD layouts)
         "aod_price": [
+            # PRIORITY: aok-offscreen contains full price like "$47.14" (note: aok- not a-)
+            "#aod-pinned-offer .aok-offscreen",
+            "#aod-pinned-offer span.aok-offscreen",
+            ".aok-align-center .aok-offscreen",
+            # Pinned offer price - centralizedApexPricePriceToPayMargin class
+            "#aod-pinned-offer .centralizedApexPricePriceToPayMargin .aok-offscreen",
+            "#aod-pinned-offer .a-price[data-a-color='base'] .aok-offscreen",
+            # Fallback to a-offscreen (sometimes has price)
             "#aod-pinned-offer .a-price .a-offscreen",
+            "#aod-pinned-offer .a-offscreen",
             ".aod-pinned-offer-price .a-offscreen",
+            # Pinned offer alternative IDs
+            "#pinned-de-id .aok-offscreen",
+            "#pinned-de-id .a-price .a-offscreen",
+            "#pinned-de-id .a-price-whole",
+            # AOD price containers
+            "#aod-price-0 .aok-offscreen",
+            "#aod-price-0 .a-offscreen",
+            "#aod-offer-price .aok-offscreen",
+            "#aod-offer-price .a-offscreen",
+            # Generic price in AOD context
+            ".a-price[data-a-color='base'] .aok-offscreen",
+            ".a-price[data-a-color='price'] .a-offscreen",
+            "#aod-offer .a-price .a-offscreen",
+            "#aod-offer .aok-offscreen",
         ],
         # Standard page - Seller info
         "standard_merchant_info": [
@@ -722,22 +745,114 @@ class AmazonFlow:
     async def _extract_price(self, page: Page, is_aod: bool) -> PriceInfo:
         """Extract displayed price from page."""
         import re
-        selectors = self.SELECTORS.get("aod_price" if is_aod else "standard_price", [])
+        selector_key = "aod_price" if is_aod else "standard_price"
+        selectors = self.SELECTORS.get(selector_key, [])
+
+        await self._log_step("debug_price_extraction", f"Starting price extraction (is_aod={is_aod})", {
+            "selector_key": selector_key,
+            "num_selectors": len(selectors)
+        })
 
         for selector in selectors:
             try:
                 elem = page.locator(selector).first
-                if await elem.is_visible(timeout=500):
+                count = await page.locator(selector).count()
+                is_visible = await elem.is_visible(timeout=500) if count > 0 else False
+
+                if is_visible:
                     text = (await elem.inner_text()).strip()
+                    await self._log_step("debug_price_selector_match", f"Selector matched: {selector}", {
+                        "text": text,
+                        "selector": selector
+                    })
+
                     # Parse "$123.45" or "123.45" format
                     price_match = re.search(r'\$?([\d,]+\.?\d*)', text)
                     if price_match:
+                        price = float(price_match.group(1).replace(',', ''))
+                        await self._log_step("debug_price_parsed", f"Parsed price: ${price:.2f}", {
+                            "raw_text": text,
+                            "parsed_price": price
+                        })
                         return PriceInfo(
-                            displayed_price=float(price_match.group(1).replace(',', '')),
+                            displayed_price=price,
                             raw_text=text
                         )
-            except:
+                    else:
+                        await self._log_step("debug_price_no_match", f"No price pattern in text: '{text}'")
+                else:
+                    await self._log_step("debug_price_selector_not_visible", f"Selector not visible: {selector}", {
+                        "count": count
+                    })
+            except Exception as e:
+                await self._log_step("debug_price_selector_error", f"Selector error: {selector}", {
+                    "error": str(e)
+                })
                 continue
+
+        # If all selectors failed, try JavaScript evaluation as fallback
+        await self._log_step("debug_price_js_fallback", "Trying JavaScript fallback for price extraction")
+        try:
+            js_price_result = await page.evaluate("""
+                () => {
+                    // Try multiple DOM queries - prioritize aok-offscreen which has full price
+                    const queries = [
+                        '#aod-pinned-offer .aok-offscreen',
+                        '#aod-pinned-offer span.aok-offscreen',
+                        '.aok-align-center .aok-offscreen',
+                        '#aod-pinned-offer .centralizedApexPricePriceToPayMargin .aok-offscreen',
+                        '#aod-pinned-offer .a-price .a-offscreen',
+                        '#aod-pinned-offer .a-price-whole',
+                        '.aod-pinned-offer-price .a-offscreen',
+                        '#pinned-de-id .a-price .a-offscreen',
+                        '.a-price[data-a-color="price"] .a-offscreen',
+                        '#aod-price-0 .a-offscreen',
+                        '.a-price .a-offscreen',
+                        '#corePrice_feature_div .a-price .a-offscreen'
+                    ];
+
+                    let results = [];
+                    for (const q of queries) {
+                        const elem = document.querySelector(q);
+                        if (elem) {
+                            const text = (elem.innerText || elem.textContent || '').trim();
+                            if (text && text.length > 0) {
+                                results.push({selector: q, text: text, visible: elem.offsetParent !== null});
+                            }
+                        }
+                    }
+                    return results;
+                }
+            """)
+            await self._log_step("debug_price_js_results", f"JS found {len(js_price_result)} price elements", {
+                "results": js_price_result
+            })
+
+            # Try to parse any visible price from JS results
+            for result in js_price_result:
+                if result.get("text"):
+                    text = result["text"].strip()
+                    price_match = re.search(r'\$?([\d,]+\.?\d*)', text)
+                    if price_match:
+                        price = float(price_match.group(1).replace(',', ''))
+                        await self._log_step("debug_price_js_parsed", f"Parsed from JS: ${price:.2f}", {
+                            "selector": result.get("selector"),
+                            "text": text,
+                            "visible": result.get("visible")
+                        })
+                        return PriceInfo(
+                            displayed_price=price,
+                            raw_text=text
+                        )
+        except Exception as e:
+            await self._log_step("debug_price_js_error", f"JS fallback error: {str(e)}")
+
+        # Take screenshot for debugging
+        try:
+            screenshot_path = await browser_manager.take_screenshot("price_extraction_failed")
+            await self._log_step("debug_price_screenshot", f"Screenshot saved: {screenshot_path}")
+        except:
+            pass
 
         return PriceInfo(raw_text="Price not found")
 
