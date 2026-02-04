@@ -779,40 +779,96 @@ class AmazonFlow:
         ships_from = None
         sold_by = None
 
-        # Try to get ships from
-        try:
-            # Look for ships-from container within this offer
-            ships_container = offer_element.locator("[id*='shipsFrom'], .aod-ship-from").first
-            if await ships_container.is_visible(timeout=300):
-                text = (await ships_container.inner_text()).strip()
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
-                for line in lines:
-                    if 'ships from' in line.lower():
-                        continue
-                    ships_from = line
-                    break
-        except:
-            pass
+        # Multiple selector strategies for ships_from
+        ships_selectors = [
+            "#aod-offer-shipsFrom",
+            "[id*='shipsFrom']",
+            ".aod-ship-from",
+            "#aod-bottlingDepositFee-shipsFrom",
+            "span:has-text('Ships from')",
+        ]
 
-        # Try to get sold by
-        try:
-            # First try to find seller link
-            sold_link = offer_element.locator("[id*='soldBy'] a, .aod-sold-by a").first
-            if await sold_link.is_visible(timeout=300):
-                sold_by = (await sold_link.inner_text()).strip()
-            else:
-                # Fallback: get text container
-                sold_text_elem = offer_element.locator("[id*='soldBy'], .aod-sold-by").first
-                if await sold_text_elem.is_visible(timeout=300):
-                    text = (await sold_text_elem.inner_text()).strip()
-                    lines = [line.strip() for line in text.split('\n') if line.strip()]
+        for selector in ships_selectors:
+            if ships_from:
+                break
+            try:
+                container = offer_element.locator(selector).first
+                if await container.is_visible(timeout=200):
+                    text = (await container.inner_text()).strip()
+                    lines = [l.strip() for l in text.split('\n') if l.strip()]
                     for line in lines:
-                        if 'sold by' in line.lower() or 'rating' in line.lower() or '%' in line:
+                        if 'ships from' in line.lower():
                             continue
-                        sold_by = line
-                        break
-        except:
-            pass
+                        if line and len(line) > 1:
+                            ships_from = line
+                            break
+            except:
+                continue
+
+        # Multiple selector strategies for sold_by
+        sold_selectors = [
+            "#aod-offer-soldBy a",
+            "[id*='soldBy'] a",
+            ".aod-sold-by a",
+            "#aod-offer-soldBy",
+            "[id*='soldBy']",
+            ".aod-sold-by",
+        ]
+
+        for selector in sold_selectors:
+            if sold_by:
+                break
+            try:
+                elem = offer_element.locator(selector).first
+                if await elem.is_visible(timeout=200):
+                    text = (await elem.inner_text()).strip()
+                    # If it's a link, just use the text directly
+                    if 'a' in selector:
+                        if text and len(text) > 1:
+                            sold_by = text
+                    else:
+                        # Parse container text
+                        lines = [line.strip() for line in text.split('\n') if line.strip()]
+                        for line in lines:
+                            if 'sold by' in line.lower() or 'rating' in line.lower() or '%' in line:
+                                continue
+                            if line and len(line) > 1:
+                                sold_by = line
+                                break
+            except:
+                continue
+
+        # FALLBACK: Parse the entire offer element text for "Ships from X" / "Sold by Y" patterns
+        if not ships_from or not sold_by:
+            try:
+                full_text = (await offer_element.inner_text()).strip()
+                lines = full_text.split('\n')
+
+                for i, line in enumerate(lines):
+                    line = line.strip()
+                    line_lower = line.lower()
+
+                    # Look for "Ships from" followed by seller name on next line
+                    if not ships_from and 'ships from' in line_lower:
+                        # Check if seller name is on same line after colon
+                        if ':' in line:
+                            ships_from = line.split(':')[-1].strip()
+                        # Or check next line
+                        elif i + 1 < len(lines):
+                            next_line = lines[i + 1].strip()
+                            if next_line and 'sold by' not in next_line.lower():
+                                ships_from = next_line
+
+                    # Look for "Sold by" followed by seller name
+                    if not sold_by and 'sold by' in line_lower:
+                        if ':' in line:
+                            sold_by = line.split(':')[-1].strip()
+                        elif i + 1 < len(lines):
+                            next_line = lines[i + 1].strip()
+                            if next_line and '%' not in next_line and 'rating' not in next_line.lower():
+                                sold_by = next_line
+            except:
+                pass
 
         return ships_from, sold_by
 
