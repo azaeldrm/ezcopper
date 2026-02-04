@@ -60,10 +60,16 @@ TIMEOUT_MS_CHECKOUT_LOAD = int(os.getenv("TIMEOUT_MS_CHECKOUT_LOAD", "30000"))
 # Timeout in seconds for order confirmation
 TIMEOUT_SECONDS_ORDER_CONFIRM = float(os.getenv("TIMEOUT_SECONDS_ORDER_CONFIRM", "300"))
 
-# Fixed waits in seconds (always waits full duration)
+# Fixed waits in seconds (DEPRECATED - prefer event-driven waits below)
+# These are only used as fallbacks when element detection fails
 WAIT_SECONDS_DYNAMIC_CONTENT = float(os.getenv("WAIT_SECONDS_DYNAMIC_CONTENT", "2.0"))
 WAIT_SECONDS_CART_UPDATE = float(os.getenv("WAIT_SECONDS_CART_UPDATE", "2.0"))
 WAIT_SECONDS_CHECKOUT_TRANSITION = float(os.getenv("WAIT_SECONDS_CHECKOUT_TRANSITION", "3.0"))
+
+# Event-driven wait timeouts (proceed immediately when element appears)
+TIMEOUT_MS_BUYBOX_READY = int(os.getenv("TIMEOUT_MS_BUYBOX_READY", "10000"))  # Wait for buybox after page load
+TIMEOUT_MS_CART_CONFIRM = int(os.getenv("TIMEOUT_MS_CART_CONFIRM", "10000"))  # Wait for cart confirmation
+TIMEOUT_MS_CHECKOUT_READY = int(os.getenv("TIMEOUT_MS_CHECKOUT_READY", "15000"))  # Wait for checkout page elements
 
 # Retry settings
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
@@ -254,6 +260,28 @@ class AmazonFlow:
             "#apex_desktop .a-price .a-offscreen",
             ".a-price.aok-align-center .a-offscreen",
         ],
+        # Event-driven wait selectors - elements indicating page is ready
+        "buybox_ready": [
+            "#add-to-cart-button",
+            "#buy-now-button",
+            "#buybox-see-all-buying-choices",
+            "#desktop_buybox",
+            "#aod-pinned-offer",
+        ],
+        "cart_confirm_ready": [
+            "#attach-sidesheet",  # Side panel
+            "#sw-atc-details-single-container",  # Cart added confirmation
+            "#huc-v2-order-row-confirm-text",  # "Added to Cart" text
+            "#NATC_SMART_WAGON_CONF_MSG_SUCCESS",  # Success message
+            "#hlb-view-cart-announce",  # View cart button appeared
+        ],
+        "checkout_ready": [
+            "input[name='placeYourOrder1']",  # Place order button
+            "#submitOrderButtonId",  # Submit order
+            "#turbo-checkout-pyo-button",  # Turbo checkout
+            "#checkout-main",  # Checkout container
+            "[data-feature-id='checkout']",  # Checkout feature
+        ],
     }
 
     # Timeouts in milliseconds (using env var values)
@@ -337,7 +365,7 @@ class AmazonFlow:
         selectors: list,
         timeout: int = 10000
     ) -> Optional[str]:
-        """Wait for any of the selectors to be visible."""
+        """Wait for any of the selectors to be visible (legacy polling method)."""
         end_time = asyncio.get_event_loop().time() + (timeout / 1000)
 
         while asyncio.get_event_loop().time() < end_time:
@@ -350,6 +378,51 @@ class AmazonFlow:
                     continue
             await asyncio.sleep(0.5)
         return None
+
+    async def _wait_for_element(
+        self,
+        page: Page,
+        selector_key: str,
+        timeout: int = 10000,
+        state: str = "visible"
+    ) -> Optional[str]:
+        """
+        Event-driven wait using Playwright's native wait_for().
+        Proceeds immediately when element appears - no polling delays.
+
+        Args:
+            page: Playwright page
+            selector_key: Key in SELECTORS dict
+            timeout: Max wait time in ms
+            state: Element state to wait for ('visible', 'attached', 'hidden')
+
+        Returns:
+            The selector that matched, or None if timeout
+        """
+        selectors = self.SELECTORS.get(selector_key, [])
+        if not selectors:
+            return None
+
+        # Create a combined selector using CSS :is() or try each one
+        # Playwright's locator can handle multiple options with 'or'
+        combined_selector = ", ".join(selectors)
+
+        try:
+            locator = page.locator(combined_selector).first
+            await locator.wait_for(state=state, timeout=timeout)
+
+            # Find which specific selector matched for logging
+            for selector in selectors:
+                try:
+                    if await page.locator(selector).first.is_visible(timeout=100):
+                        return selector
+                except:
+                    continue
+            return combined_selector
+        except PlaywrightTimeout:
+            return None
+        except Exception:
+            return None
 
     async def _extract_seller_info_aod(self, page: Page) -> SellerInfo:
         """Extract seller info from AOD panel."""
@@ -368,7 +441,11 @@ class AmazonFlow:
             see_more = page.locator("#aod-pinned-offer-show-more-link").first
             if await see_more.is_visible(timeout=500):
                 await see_more.click()
-                await asyncio.sleep(0.5)
+                # Event-driven wait: Wait for expanded content (offer cards)
+                try:
+                    await page.locator("#aod-offer").first.wait_for(state="visible", timeout=2000)
+                except:
+                    pass  # Continue even if timeout
         except:
             pass
 
@@ -659,7 +736,15 @@ class AmazonFlow:
                 if await elem.is_visible(timeout=1000):
                     await self._log_step("clicking_see_all_options", "Clicking 'See All Buying Options'")
                     await elem.click()
-                    await asyncio.sleep(2)  # Wait for AOD page to load
+
+                    # Event-driven wait: Wait for AOD panel to appear
+                    aod_ready = await self._wait_for_element(
+                        page, "aod_offer_cards", timeout=TIMEOUT_MS_AOD_PANEL
+                    )
+                    if aod_ready:
+                        await self._log_step("aod_panel_ready", "AOD panel loaded", {"selector": aod_ready})
+                    else:
+                        await asyncio.sleep(1.0)  # Fallback
                     return True
             except:
                 continue
@@ -687,7 +772,11 @@ class AmazonFlow:
             see_more = page.locator("#aod-pinned-offer-show-more-link").first
             if await see_more.is_visible(timeout=500):
                 await see_more.click()
-                await asyncio.sleep(0.5)
+                # Event-driven wait: Wait for expanded content (offer cards)
+                try:
+                    await page.locator("#aod-offer").first.wait_for(state="visible", timeout=2000)
+                except:
+                    pass  # Continue even if timeout
         except:
             pass
 
@@ -986,7 +1075,16 @@ class AmazonFlow:
                 await self._log_step("adding_to_cart", "Clicking Add to Cart for selected AOD offer...")
                 try:
                     await aod_offer["add_button"].click()
-                    await asyncio.sleep(WAIT_SECONDS_DYNAMIC_CONTENT)
+
+                    # Event-driven wait: Wait for cart confirmation elements
+                    cart_confirm = await self._wait_for_element(
+                        page, "cart_confirm_ready", timeout=TIMEOUT_MS_CART_CONFIRM
+                    )
+                    if cart_confirm:
+                        await self._log_step("cart_confirm_detected", f"Cart confirmation appeared", {"selector": cart_confirm})
+                    else:
+                        await asyncio.sleep(1.0)  # Fallback
+
                     self._update_state(FlowState.WAITING_CART_CONFIRMATION)
                 except Exception as e:
                     return FlowResult(
@@ -1064,9 +1162,26 @@ class AmazonFlow:
 
         for attempt in range(MAX_RETRIES):
             try:
-                # Try without wait_until first - just navigate and check URL
+                # Navigate to URL
                 await page.goto(url, timeout=self.TIMEOUTS["page_load"])
-                await asyncio.sleep(WAIT_SECONDS_DYNAMIC_CONTENT)  # Wait for dynamic content
+
+                # Event-driven wait: Wait for buybox elements to appear (acts immediately when ready)
+                ready_selector = await self._wait_for_element(
+                    page, "buybox_ready", timeout=TIMEOUT_MS_BUYBOX_READY
+                )
+
+                if ready_selector:
+                    await event_broker.publish(
+                        event_broker.create_event(
+                            EventType.STEP,
+                            "amazon_buybox_ready",
+                            url=page.url,
+                            details={"ready_selector": ready_selector}
+                        )
+                    )
+                else:
+                    # Fallback: short fixed wait if no buybox detected (page might have different layout)
+                    await asyncio.sleep(1.0)
 
                 # Check if we landed on a product page
                 if "amazon.com" in page.url or "amzn" in page.url:
@@ -1117,7 +1232,18 @@ class AmazonFlow:
                 elem = page.locator(selector).first
                 if await elem.is_visible(timeout=1000):
                     await elem.click()
-                    await asyncio.sleep(WAIT_SECONDS_DYNAMIC_CONTENT)
+
+                    # Event-driven wait: Wait for checkout page elements to appear
+                    checkout_ready = await self._wait_for_element(
+                        page, "checkout_ready", timeout=TIMEOUT_MS_CHECKOUT_READY
+                    )
+
+                    if checkout_ready:
+                        await self._log_step("checkout_ready", f"Checkout page ready", {"selector": checkout_ready})
+                    else:
+                        # Fallback short wait if checkout elements not detected
+                        await asyncio.sleep(1.0)
+
                     self._update_state(FlowState.ON_CHECKOUT_PAGE)
                     return True
             except:
@@ -1146,8 +1272,8 @@ class AmazonFlow:
             "#add-to-cart-button",  # Main Add to Cart (fallback)
         ]
 
-        # Wait up to 10 seconds for any cart-related element to appear
-        panel_found = await self._wait_for_any(page, aod_ready_selectors, timeout=TIMEOUT_MS_AOD_PANEL)
+        # Event-driven wait: Wait for any cart-related element to appear
+        panel_found = await self._wait_for_element(page, "buybox_ready", timeout=TIMEOUT_MS_AOD_PANEL)
         if panel_found:
             await event_broker.publish(
                 event_broker.create_event(
@@ -1157,8 +1283,7 @@ class AmazonFlow:
                     details={"selector": panel_found}
                 )
             )
-            # Small delay for any remaining JavaScript to settle
-            await asyncio.sleep(0.5)
+            # No fixed delay - element is already visible
 
         for attempt in range(MAX_RETRIES):
             if await self._find_and_click(
@@ -1167,7 +1292,17 @@ class AmazonFlow:
                 "amazon_add_to_cart_click",
                 timeout=self.TIMEOUTS["element_visible"]
             ):
-                await asyncio.sleep(WAIT_SECONDS_CART_UPDATE)  # Wait for cart update
+                # Event-driven wait: Wait for cart confirmation elements
+                cart_confirm = await self._wait_for_element(
+                    page, "cart_confirm_ready", timeout=TIMEOUT_MS_CART_CONFIRM
+                )
+
+                if cart_confirm:
+                    await self._log_step("cart_confirm_detected", f"Cart confirmation appeared", {"selector": cart_confirm})
+                else:
+                    # Fallback short wait if confirmation not detected
+                    await asyncio.sleep(1.0)
+
                 return FlowResult(
                     success=True,
                     state=FlowState.ADDING_TO_CART,
@@ -1265,7 +1400,15 @@ class AmazonFlow:
             "amazon_side_panel_checkout_click",
             timeout=5000
         ):
-            await asyncio.sleep(WAIT_SECONDS_CHECKOUT_TRANSITION)
+            # Event-driven wait: Wait for checkout page elements
+            checkout_ready = await self._wait_for_element(
+                page, "checkout_ready", timeout=TIMEOUT_MS_CHECKOUT_READY
+            )
+            if checkout_ready:
+                await self._log_step("checkout_ready", "Checkout page ready from side panel", {"selector": checkout_ready})
+            else:
+                await asyncio.sleep(1.0)  # Fallback
+
             self._update_state(FlowState.ON_CHECKOUT_PAGE)
             return FlowResult(
                 success=True,
@@ -1289,7 +1432,12 @@ class AmazonFlow:
             "amazon_go_to_cart_click",
             timeout=5000
         ):
-            await asyncio.sleep(WAIT_SECONDS_CHECKOUT_TRANSITION)
+            # Event-driven wait: Wait for cart page to load (cart checkout button)
+            cart_ready = await self._wait_for_element(
+                page, "cart_checkout", timeout=TIMEOUT_MS_BUYBOX_READY
+            )
+            if not cart_ready:
+                await asyncio.sleep(1.0)  # Fallback
 
         # Now try to proceed to checkout from cart page
         for attempt in range(MAX_RETRIES):
@@ -1299,7 +1447,15 @@ class AmazonFlow:
                 "amazon_cart_checkout_click",
                 timeout=self.TIMEOUTS["element_visible"]
             ):
-                await asyncio.sleep(WAIT_SECONDS_CHECKOUT_TRANSITION)
+                # Event-driven wait: Wait for checkout page elements
+                checkout_ready = await self._wait_for_element(
+                    page, "checkout_ready", timeout=TIMEOUT_MS_CHECKOUT_READY
+                )
+                if checkout_ready:
+                    await self._log_step("checkout_ready", "Checkout page ready from cart", {"selector": checkout_ready})
+                else:
+                    await asyncio.sleep(1.0)  # Fallback
+
                 self._update_state(FlowState.ON_CHECKOUT_PAGE)
                 return FlowResult(
                     success=True,
@@ -1311,7 +1467,8 @@ class AmazonFlow:
             # Navigate to cart if not there
             try:
                 await page.goto("https://www.amazon.com/gp/cart/view.html", timeout=self.TIMEOUTS["page_load"])
-                await asyncio.sleep(WAIT_SECONDS_DYNAMIC_CONTENT)
+                # Event-driven wait for cart page
+                await self._wait_for_element(page, "cart_checkout", timeout=TIMEOUT_MS_BUYBOX_READY)
             except Exception:
                 pass
 
@@ -1337,14 +1494,9 @@ class AmazonFlow:
             )
         )
 
-        # Wait for checkout page to fully load
-        await asyncio.sleep(WAIT_SECONDS_CHECKOUT_TRANSITION)
-
-        # Find the Place Order button
-        place_order_found = await self._wait_for_any(
-            page,
-            self.SELECTORS["place_order"],
-            timeout=self.TIMEOUTS["checkout_load"]
+        # Event-driven wait: Wait for checkout page to be ready (Place Order button visible)
+        place_order_found = await self._wait_for_element(
+            page, "place_order", timeout=self.TIMEOUTS["checkout_load"]
         )
 
         if not place_order_found:
@@ -1422,9 +1574,7 @@ class AmazonFlow:
             "amazon_place_order_click",
             timeout=5000
         ):
-            await asyncio.sleep(5)
-
-            # Wait for order confirmation
+            # Event-driven wait: Wait for order confirmation page
             confirmation_found = await self._wait_for_any(
                 page,
                 self.SELECTORS["order_confirmation"],
