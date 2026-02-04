@@ -387,14 +387,8 @@ class AmazonFlow:
         state: str = "visible"
     ) -> Optional[str]:
         """
-        Event-driven wait - races multiple selectors in parallel.
-        Returns immediately when ANY selector becomes visible.
-
-        Args:
-            page: Playwright page
-            selector_key: Key in SELECTORS dict
-            timeout: Max wait time in ms
-            state: Element state to wait for ('visible', 'attached', 'hidden')
+        Wait for any of the selectors to become visible.
+        Simple polling approach - checks each selector in sequence.
 
         Returns:
             The selector that matched, or None if timeout
@@ -403,46 +397,19 @@ class AmazonFlow:
         if not selectors:
             return None
 
-        async def wait_for_selector(selector: str) -> Optional[str]:
-            """Wait for a single selector and return it if found."""
-            try:
-                locator = page.locator(selector).first
-                await locator.wait_for(state=state, timeout=timeout)
-                return selector
-            except:
-                return None
+        end_time = asyncio.get_event_loop().time() + (timeout / 1000)
 
-        # Race all selectors - first one to appear wins
-        try:
-            tasks = [asyncio.create_task(wait_for_selector(s)) for s in selectors]
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        while asyncio.get_event_loop().time() < end_time:
+            for selector in selectors:
+                try:
+                    locator = page.locator(selector).first
+                    if await locator.is_visible(timeout=200):
+                        return selector
+                except:
+                    continue
+            await asyncio.sleep(0.3)
 
-            # Cancel remaining tasks
-            for task in pending:
-                task.cancel()
-
-            # Get result from completed task
-            for task in done:
-                result = task.result()
-                if result:
-                    return result
-
-            # If first completed returned None, wait briefly for others
-            if pending:
-                done2, pending2 = await asyncio.wait(pending, timeout=0.5)
-                for task in pending2:
-                    task.cancel()
-                for task in done2:
-                    try:
-                        result = task.result()
-                        if result:
-                            return result
-                    except:
-                        pass
-
-            return None
-        except Exception:
-            return None
+        return None
 
     async def _extract_seller_info_aod(self, page: Page) -> SellerInfo:
         """Extract seller info from AOD panel."""
@@ -1268,10 +1235,11 @@ class AmazonFlow:
 
         for attempt in range(MAX_RETRIES):
             try:
-                # Navigate to URL (default wait_until="load")
-                await page.goto(url, timeout=self.TIMEOUTS["page_load"])
+                # Navigate to URL - don't wait for full load, just DOM ready
+                # This prevents timeout on slow-loading images/resources
+                await page.goto(url, wait_until="domcontentloaded", timeout=self.TIMEOUTS["page_load"])
 
-                # Wait for buybox elements OR use short fallback
+                # Wait for buybox elements to appear (this is the real check)
                 ready_selector = await self._wait_for_element(
                     page, "buybox_ready", timeout=TIMEOUT_MS_BUYBOX_READY
                 )
@@ -1285,8 +1253,8 @@ class AmazonFlow:
                             details={"ready_selector": ready_selector}
                         )
                     )
-                # Always do a brief wait for any remaining JS to settle
-                await asyncio.sleep(0.5)
+                # Brief wait for JS to settle
+                await asyncio.sleep(0.3)
 
                 # Check if we landed on a product page
                 if "amazon.com" in page.url or "amzn" in page.url:
