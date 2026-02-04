@@ -918,90 +918,49 @@ class AmazonFlow:
                 # Try to find the pinned offer additional content container
                 pinned_container = page.locator("#aod-pinned-offer-additional-content, #aod-pinned-offer").first
 
-                # DEBUG: Log what we can see
+                # Wait for the seller info elements to load (they appear after AOD panel loads)
                 try:
                     ships_elem_direct = page.locator("#aod-offer-shipsFrom").first
-                    if await ships_elem_direct.is_visible(timeout=500):
-                        debug_text = await ships_elem_direct.inner_text()
-                        await self._log_step("debug_ships_element", f"Found #aod-offer-shipsFrom with text: {debug_text[:100]}")
-                    else:
-                        await self._log_step("debug_ships_element", "#aod-offer-shipsFrom NOT visible")
+                    await ships_elem_direct.wait_for(state="visible", timeout=5000)
+                    debug_text = await ships_elem_direct.inner_text()
+                    await self._log_step("debug_ships_element", f"Found #aod-offer-shipsFrom: {debug_text[:100]}")
                 except Exception as e:
-                    await self._log_step("debug_ships_element", f"Error finding #aod-offer-shipsFrom: {str(e)}")
+                    await self._log_step("debug_ships_element", f"#aod-offer-shipsFrom not found after wait: {str(e)}")
 
-                # Get ships_from
-                ships_selectors = [
-                    "#aod-offer-shipsFrom .a-col-right span.a-color-base",
-                    "#aod-offer-shipsFrom .a-col-right span",
-                    "#aod-offer-shipsFrom .a-col-right",
-                    "#aod-offer-shipsFrom",
-                ]
-                for sel in ships_selectors:
-                    if ships_from:
-                        break
-                    try:
-                        # Try within pinned container first
-                        elem = pinned_container.locator(sel).first
-                        if await elem.is_visible(timeout=200):
-                            text = (await elem.inner_text()).strip()
-                            # Parse out the value (skip "Ships from" label)
-                            lines = [l.strip() for l in text.split('\n') if l.strip()]
-                            for line in lines:
-                                if 'ships from' not in line.lower() and len(line) > 1:
-                                    ships_from = line
-                                    break
-                            if ships_from:
+                # Get ships_from - element should be visible now after wait
+                try:
+                    ships_container = page.locator("#aod-offer-shipsFrom").first
+                    if await ships_container.is_visible(timeout=500):
+                        text = (await ships_container.inner_text()).strip()
+                        lines = [l.strip() for l in text.split('\n') if l.strip()]
+                        for line in lines:
+                            if 'ships from' not in line.lower() and len(line) > 1:
+                                ships_from = line
                                 break
-                    except:
-                        pass
-                    try:
-                        # Fallback: try on page directly
-                        elem = page.locator(sel).first
-                        if await elem.is_visible(timeout=200):
-                            text = (await elem.inner_text()).strip()
-                            lines = [l.strip() for l in text.split('\n') if l.strip()]
-                            for line in lines:
-                                if 'ships from' not in line.lower() and len(line) > 1:
-                                    ships_from = line
-                                    break
-                    except:
-                        continue
+                except:
+                    pass
 
                 # Get sold_by
-                sold_selectors = [
-                    "#aod-offer-soldBy .a-col-right a",
-                    "#aod-offer-soldBy .a-col-right span",
-                    "#aod-offer-soldBy .a-col-right",
-                    "#aod-offer-soldBy a",
-                    "#aod-offer-soldBy",
-                ]
-                for sel in sold_selectors:
-                    if sold_by:
-                        break
+                try:
+                    # Try link first (most common)
+                    sold_link = page.locator("#aod-offer-soldBy a").first
+                    if await sold_link.is_visible(timeout=500):
+                        sold_by = (await sold_link.inner_text()).strip()
+                except:
+                    pass
+
+                if not sold_by:
                     try:
-                        elem = pinned_container.locator(sel).first
-                        if await elem.is_visible(timeout=200):
-                            text = (await elem.inner_text()).strip()
+                        sold_container = page.locator("#aod-offer-soldBy").first
+                        if await sold_container.is_visible(timeout=500):
+                            text = (await sold_container.inner_text()).strip()
                             lines = [l.strip() for l in text.split('\n') if l.strip()]
                             for line in lines:
                                 if 'sold by' not in line.lower() and len(line) > 1:
                                     sold_by = line
                                     break
-                            if sold_by:
-                                break
                     except:
                         pass
-                    try:
-                        elem = page.locator(sel).first
-                        if await elem.is_visible(timeout=200):
-                            text = (await elem.inner_text()).strip()
-                            lines = [l.strip() for l in text.split('\n') if l.strip()]
-                            for line in lines:
-                                if 'sold by' not in line.lower() and len(line) > 1:
-                                    sold_by = line
-                                    break
-                    except:
-                        continue
 
                 await self._log_step("aod_pinned_checked", f"Pinned offer: Ships from '{ships_from}', Sold by '{sold_by}'", {
                     "offer_type": "pinned",
