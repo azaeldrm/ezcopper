@@ -873,13 +873,10 @@ class AmazonFlow:
         return ships_from, sold_by
 
     def _is_valid_amazon_offer(self, ships_from: Optional[str], sold_by: Optional[str]) -> bool:
-        """Check if offer is from valid Amazon seller."""
+        """Check if offer ships from Amazon.com (seller can be anyone as long as price matches)."""
         is_valid_shipper = ships_from and ships_from.strip().lower() == "amazon.com"
-        is_valid_seller = sold_by and any(
-            keyword in sold_by.lower()
-            for keyword in ["amazon.com", "amazon resale", "amazon warehouse"]
-        )
-        return is_valid_shipper and is_valid_seller
+        # Only require ships from Amazon - seller can be third party if price matches
+        return is_valid_shipper
 
     async def _find_valid_amazon_offer_in_aod(self, page: Page) -> Optional[Dict[str, Any]]:
         """
@@ -905,13 +902,38 @@ class AmazonFlow:
 
         # =================================================================
         # STEP 1: Check the PINNED OFFER first (featured offer at top)
+        # The pinned offer's seller info is in #aod-offer-shipsFrom and #aod-offer-soldBy
+        # which may be siblings of #aod-pinned-offer, not children
         # =================================================================
         try:
             pinned_offer = page.locator("#aod-pinned-offer").first
             if await pinned_offer.is_visible(timeout=1000):
                 await self._log_step("aod_checking_pinned", "Checking pinned offer...")
 
-                ships_from, sold_by = await self._extract_aod_offer_info(pinned_offer, "pinned")
+                # Extract seller info directly from page (not scoped to pinned_offer)
+                # because #aod-offer-shipsFrom may be a sibling, not a child
+                ships_from = None
+                sold_by = None
+
+                # Get ships_from from #aod-offer-shipsFrom .a-col-right span
+                try:
+                    ships_elem = page.locator("#aod-offer-shipsFrom .a-col-right span.a-size-small").first
+                    if await ships_elem.is_visible(timeout=500):
+                        ships_from = (await ships_elem.inner_text()).strip()
+                except:
+                    pass
+
+                # Get sold_by from #aod-offer-soldBy .a-col-right a (or span if no link)
+                try:
+                    sold_link = page.locator("#aod-offer-soldBy .a-col-right a").first
+                    if await sold_link.is_visible(timeout=500):
+                        sold_by = (await sold_link.inner_text()).strip()
+                    else:
+                        sold_span = page.locator("#aod-offer-soldBy .a-col-right span.a-size-small").first
+                        if await sold_span.is_visible(timeout=300):
+                            sold_by = (await sold_span.inner_text()).strip()
+                except:
+                    pass
 
                 await self._log_step("aod_pinned_checked", f"Pinned offer: Ships from '{ships_from}', Sold by '{sold_by}'", {
                     "offer_type": "pinned",
