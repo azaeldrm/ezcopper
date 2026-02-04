@@ -911,29 +911,48 @@ class AmazonFlow:
                 await self._log_step("aod_checking_pinned", "Checking pinned offer...")
 
                 # Extract seller info directly from page (not scoped to pinned_offer)
-                # because #aod-offer-shipsFrom may be a sibling, not a child
+                # The elements are inside #aod-pinned-offer-additional-content
                 ships_from = None
                 sold_by = None
 
-                # Get ships_from from #aod-offer-shipsFrom .a-col-right span
-                try:
-                    ships_elem = page.locator("#aod-offer-shipsFrom .a-col-right span.a-size-small").first
-                    if await ships_elem.is_visible(timeout=500):
-                        ships_from = (await ships_elem.inner_text()).strip()
-                except:
-                    pass
+                # Get ships_from - try multiple approaches
+                ships_selectors = [
+                    "#aod-offer-shipsFrom .a-col-right span.a-color-base",
+                    "#aod-offer-shipsFrom .a-col-right span",
+                    "#aod-offer-shipsFrom .a-col-right",
+                ]
+                for sel in ships_selectors:
+                    if ships_from:
+                        break
+                    try:
+                        elem = page.locator(sel).first
+                        if await elem.is_visible(timeout=300):
+                            text = (await elem.inner_text()).strip()
+                            if text and 'ships from' not in text.lower():
+                                ships_from = text
+                                break
+                    except:
+                        continue
 
-                # Get sold_by from #aod-offer-soldBy .a-col-right a (or span if no link)
-                try:
-                    sold_link = page.locator("#aod-offer-soldBy .a-col-right a").first
-                    if await sold_link.is_visible(timeout=500):
-                        sold_by = (await sold_link.inner_text()).strip()
-                    else:
-                        sold_span = page.locator("#aod-offer-soldBy .a-col-right span.a-size-small").first
-                        if await sold_span.is_visible(timeout=300):
-                            sold_by = (await sold_span.inner_text()).strip()
-                except:
-                    pass
+                # Get sold_by - try multiple approaches
+                sold_selectors = [
+                    "#aod-offer-soldBy .a-col-right a",
+                    "#aod-offer-soldBy .a-col-right span.a-color-base",
+                    "#aod-offer-soldBy .a-col-right span",
+                    "#aod-offer-soldBy .a-col-right",
+                ]
+                for sel in sold_selectors:
+                    if sold_by:
+                        break
+                    try:
+                        elem = page.locator(sel).first
+                        if await elem.is_visible(timeout=300):
+                            text = (await elem.inner_text()).strip()
+                            if text and 'sold by' not in text.lower():
+                                sold_by = text
+                                break
+                    except:
+                        continue
 
                 await self._log_step("aod_pinned_checked", f"Pinned offer: Ships from '{ships_from}', Sold by '{sold_by}'", {
                     "offer_type": "pinned",
