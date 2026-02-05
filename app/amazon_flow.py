@@ -521,6 +521,26 @@ class AmazonFlow:
         info = SellerInfo()
 
         # =================================================================
+        # PRIORITY 0: Fast check for new ODF (Offer Display Features) format
+        # =================================================================
+        # Amazon's newer pages use merchantInfoFeature with offer-display-feature-text-message
+        try:
+            odf_seller = page.locator("#merchantInfoFeature_feature_div .offer-display-feature-text-message").first
+            if await odf_seller.is_visible(timeout=100):
+                seller_name = (await odf_seller.inner_text()).strip()
+                if seller_name and len(seller_name) > 1:
+                    await self._log_step("debug_odf_seller_found", f"Found seller via ODF: {seller_name}")
+                    info.sold_by = seller_name
+                    info.ships_from = seller_name
+                    if 'amazon' in seller_name.lower():
+                        info.ships_from = "Amazon.com"
+                        info.sold_by = "Amazon.com"
+                    info.raw_text = f"ODF merchant info: {seller_name}"
+                    return info
+        except:
+            pass
+
+        # =================================================================
         # PRIORITY 1: Try specific seller element selectors first
         # =================================================================
         # Look for seller link directly (most reliable when present)
@@ -534,7 +554,7 @@ class AmazonFlow:
         for selector in seller_link_selectors:
             try:
                 elem = page.locator(selector).first
-                if await elem.is_visible(timeout=300):
+                if await elem.is_visible(timeout=150):  # Reduced from 300ms
                     seller_name = (await elem.inner_text()).strip()
                     if seller_name and len(seller_name) > 1:
                         await self._log_step("debug_seller_link_found", f"Found seller via link: {seller_name}", {"selector": selector})
@@ -564,7 +584,7 @@ class AmazonFlow:
         for selector in buybox_selectors:
             try:
                 element = page.locator(selector).first
-                if await element.is_visible(timeout=500):
+                if await element.is_visible(timeout=200):  # Reduced from 500ms
                     buybox_text = (await element.inner_text()).strip()
                     if buybox_text:
                         await self._log_step("debug_buybox_found", f"Found buybox with selector: {selector}", {"preview": buybox_text[:200]})
@@ -873,10 +893,20 @@ class AmazonFlow:
 
     async def _check_and_click_see_all_options(self, page: Page) -> bool:
         """Check for 'See All Buying Options' and click it. Returns True if clicked."""
+        # FAST PATH: If Add to Cart or Buy Now is already visible, we have a buybox - skip this check
+        try:
+            buy_now = page.locator("#buy-now-button").first
+            add_to_cart = page.locator("#add-to-cart-button").first
+            if await buy_now.is_visible(timeout=100) or await add_to_cart.is_visible(timeout=100):
+                await self._log_step("buybox_exists", "Buybox buttons visible, skipping 'See All Buying Options' check")
+                return False
+        except:
+            pass  # Continue with normal check
+
         for selector in self.SELECTORS.get("see_all_buying_options", []):
             try:
                 elem = page.locator(selector).first
-                if await elem.is_visible(timeout=1000):
+                if await elem.is_visible(timeout=200):  # Reduced from 1000ms
                     await self._log_step("clicking_see_all_options", "Clicking 'See All Buying Options'")
                     await elem.click()
 
