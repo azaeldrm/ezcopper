@@ -1571,10 +1571,18 @@ class AmazonFlow:
                     return result
 
             # Step 5: Validate price
-            if expected_price is not None:
+            # Skip if AOD offer was selected - price was already validated during offer traversal
+            if expected_price is not None and not aod_offer:
                 result = await self._step_validate_price(page, expected_price, is_aod)
                 if not result.success:
                     return result
+            elif aod_offer and aod_offer.get("price") is not None:
+                # Log that we're using pre-validated price from AOD traversal
+                await self._log_step("price_validated", f"Price ${aod_offer['price']:.2f} already validated during AOD selection", {
+                    "price": aod_offer["price"],
+                    "expected_price": expected_price,
+                    "offer_index": aod_offer.get("offer_index")
+                })
 
             # Step 6: Add to cart or Buy Now
             used_buy_now = False
