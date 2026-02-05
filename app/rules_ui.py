@@ -858,8 +858,8 @@ HTML_TEMPLATE = """
             item.dataset.messageId = messageId; // Store for step updates
             item.innerHTML = `
                 <div class="feed-item-header">
-                    ${renderTriggerButton(itemData)}
                     <span class="feed-verdict ${verdictClass}">${verdictText}</span>
+                    ${renderTriggerButton(itemData)}
                     <div class="feed-item-meta">
                         ${channel ? `<span class="feed-channel">${escapeHtml(channel)}</span>` : ''}
                         <span class="feed-item-time">${formatTime(data.ts)}</span>
@@ -956,7 +956,7 @@ HTML_TEMPLATE = """
                     // Real-time step updates for flow progress
                     const messageId = data.details?.message_id;
                     if (messageId && data.details?.message) {
-                        const container = document.querySelector(`[data-message-id="${messageId}"]`);
+                        const container = document.querySelector(`.steps-container[data-message-id="${messageId}"]`);
                         if (container) {
                             // Append new step
                             const stepHtml = `
@@ -1229,9 +1229,9 @@ HTML_TEMPLATE = """
             elem.dataset.messageId = messageId; // Store for step updates
             elem.innerHTML = `
                 <div class="feed-item-header">
-                    ${renderResultBadge(item)}
-                    ${renderTriggerButton(item)}
                     <span class="feed-verdict ${verdictClass}">${verdictText}</span>
+                    ${renderTriggerButton(item)}
+                    ${renderResultBadge(item)}
                     <div class="feed-item-meta">
                         ${thisChannel ? `<span class="feed-channel">${escapeHtml(thisChannel)}</span>` : ''}
                         <span class="feed-item-time">${formatTime(item.ts)}</span>
