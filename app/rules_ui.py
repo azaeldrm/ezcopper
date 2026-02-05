@@ -563,7 +563,7 @@ HTML_TEMPLATE = """
             font-size: 0.75em;
             cursor: pointer;
             border-radius: 4px;
-            margin-left: 8px;
+            margin-right: 8px;
             transition: all 0.2s;
         }
         .btn-trigger:hover {
@@ -584,7 +584,24 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <!-- Left Panel: Rules -->
+        <!-- Left Panel: Activity Feed -->
+        <div class="panel">
+            <div class="feed-header">
+                <h2>Live Activity Feed</h2>
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <div class="connection-status">
+                        <span class="status-dot" id="connection-dot"></span>
+                        <span id="connection-text">Connecting...</span>
+                    </div>
+                    <button class="clear-feed" onclick="clearFeed()">Clear</button>
+                </div>
+            </div>
+            <div class="activity-feed" id="activity-feed">
+                <div class="empty-state" id="feed-empty">Waiting for activity...</div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Rules -->
         <div class="panel">
             <h2>Purchase Rules</h2>
             <div id="status" class="status"></div>
@@ -629,23 +646,6 @@ HTML_TEMPLATE = """
                 </div>
                 <input type="hidden" id="modal-rule-type" value="blacklist">
                 <button class="btn-primary" onclick="addRuleFromModal()">Add Rule</button>
-            </div>
-        </div>
-
-        <!-- Right Panel: Activity Feed -->
-        <div class="panel">
-            <div class="feed-header">
-                <h2>Live Activity Feed</h2>
-                <div style="display: flex; align-items: center; gap: 15px;">
-                    <div class="connection-status">
-                        <span class="status-dot" id="connection-dot"></span>
-                        <span id="connection-text">Connecting...</span>
-                    </div>
-                    <button class="clear-feed" onclick="clearFeed()">Clear</button>
-                </div>
-            </div>
-            <div class="activity-feed" id="activity-feed">
-                <div class="empty-state" id="feed-empty">Waiting for activity...</div>
             </div>
         </div>
     </div>
@@ -858,8 +858,8 @@ HTML_TEMPLATE = """
             item.dataset.messageId = messageId; // Store for step updates
             item.innerHTML = `
                 <div class="feed-item-header">
-                    <span class="feed-verdict ${verdictClass}">${verdictText}</span>
                     ${renderTriggerButton(itemData)}
+                    <span class="feed-verdict ${verdictClass}">${verdictText}</span>
                     <div class="feed-item-meta">
                         ${channel ? `<span class="feed-channel">${escapeHtml(channel)}</span>` : ''}
                         <span class="feed-item-time">${formatTime(data.ts)}</span>
@@ -1035,6 +1035,9 @@ HTML_TEMPLATE = """
             button.disabled = true;
             button.textContent = 'Triggering...';
 
+            // Generate a unique message ID for tracking this flow
+            const triggerMessageId = 'manual-trigger-' + Date.now();
+
             try {
                 const response = await fetch('/actions/trigger', {
                     method: 'POST',
@@ -1042,13 +1045,22 @@ HTML_TEMPLATE = """
                     body: JSON.stringify({
                         url: url,
                         price: price,
-                        message_id: messageId,
+                        message_id: triggerMessageId,
                         product: product
                     })
                 });
 
                 if (response.ok) {
                     button.textContent = 'Triggered ✓';
+
+                    // Create a new feed item for this triggered flow
+                    addTriggeredFlowItem({
+                        messageId: triggerMessageId,
+                        url: url,
+                        price: price,
+                        product: product
+                    });
+
                     setTimeout(() => {
                         button.textContent = 'Trigger Flow';
                         button.disabled = false;
@@ -1067,6 +1079,48 @@ HTML_TEMPLATE = """
                     button.textContent = 'Trigger Flow';
                     button.disabled = false;
                 }, 3000);
+            }
+        }
+
+        function addTriggeredFlowItem(data) {
+            const feed = document.getElementById('activity-feed');
+            const empty = document.getElementById('feed-empty');
+            if (empty) empty.remove();
+
+            const item = document.createElement('div');
+            item.className = 'feed-item triggered';
+            item.dataset.product = (data.product || '').substring(0, 100);
+            item.dataset.channel = 'manual';
+            item.dataset.messageId = data.messageId;
+
+            const productText = escapeHtml((data.product || 'Manual Trigger').substring(0, 150));
+            const productDisplay = data.url
+                ? `<a href="${escapeHtml(data.url)}" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: none; cursor: pointer;">${productText}</a>`
+                : productText;
+
+            item.innerHTML = `
+                <div class="feed-item-header">
+                    <span class="feed-verdict trigger">TRIGGERED</span>
+                    <span class="result-badge pending">PENDING</span>
+                    <div class="feed-item-meta">
+                        <span class="feed-channel">manual</span>
+                        <span class="feed-item-time">${formatTime(new Date().toISOString())}</span>
+                    </div>
+                </div>
+                <div class="feed-item-product">${productDisplay}</div>
+                <div class="feed-item-details">
+                    ${data.price ? `<span class="feed-price">$${data.price.toFixed(2)}</span>` : ''}
+                </div>
+                <button class="steps-toggle" onclick="toggleSteps(this)">0 steps ▼</button>
+                <div class="steps-container expanded" data-message-id="${escapeHtml(data.messageId)}"></div>
+            `;
+
+            // Insert at top of feed
+            feed.insertBefore(item, feed.firstChild);
+
+            // Limit feed items
+            while (feed.children.length > MAX_FEED_ITEMS) {
+                feed.removeChild(feed.lastChild);
             }
         }
 
@@ -1175,9 +1229,9 @@ HTML_TEMPLATE = """
             elem.dataset.messageId = messageId; // Store for step updates
             elem.innerHTML = `
                 <div class="feed-item-header">
+                    ${renderTriggerButton(item)}
                     <span class="feed-verdict ${verdictClass}">${verdictText}</span>
                     ${renderResultBadge(item)}
-                    ${renderTriggerButton(item)}
                     <div class="feed-item-meta">
                         ${thisChannel ? `<span class="feed-channel">${escapeHtml(thisChannel)}</span>` : ''}
                         <span class="feed-item-time">${formatTime(item.ts)}</span>
