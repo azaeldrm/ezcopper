@@ -1229,9 +1229,9 @@ HTML_TEMPLATE = """
             elem.dataset.messageId = messageId; // Store for step updates
             elem.innerHTML = `
                 <div class="feed-item-header">
+                    ${renderResultBadge(item)}
                     ${renderTriggerButton(item)}
                     <span class="feed-verdict ${verdictClass}">${verdictText}</span>
-                    ${renderResultBadge(item)}
                     <div class="feed-item-meta">
                         ${thisChannel ? `<span class="feed-channel">${escapeHtml(thisChannel)}</span>` : ''}
                         <span class="feed-item-time">${formatTime(item.ts)}</span>
