@@ -1766,7 +1766,9 @@ class AmazonFlow:
         for selector in buy_now_selectors:
             try:
                 elem = page.locator(selector).first
-                if await elem.is_visible(timeout=1000):
+                # Quick check - button should already be visible since page is loaded
+                if await elem.is_visible(timeout=200):
+                    await self._log_step("buy_now_clicking", f"Clicking Buy Now", {"selector": selector})
                     await elem.click()
 
                     # Event-driven wait: Wait for checkout page elements to appear
