@@ -75,6 +75,10 @@ TIMEOUT_MS_CHECKOUT_READY = int(os.getenv("TIMEOUT_MS_CHECKOUT_READY", "15000"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 DELAY_SECONDS_RETRY = float(os.getenv("DELAY_SECONDS_RETRY", "0.5"))
 
+# Fast checkout - skip cart confirmation page and navigate directly to checkout
+FAST_CHECKOUT = os.getenv("FAST_CHECKOUT", "false").lower() == "true"
+FAST_CHECKOUT_DELAY_MS = int(os.getenv("FAST_CHECKOUT_DELAY_MS", "300"))  # Brief delay after add-to-cart
+
 
 class FlowState(str, Enum):
     """States in the Amazon purchase flow."""
@@ -1582,20 +1586,40 @@ class AmazonFlow:
 
             # Step 6: Add to cart or Buy Now
             used_buy_now = False
+            used_fast_checkout = False
+
             if aod_offer and aod_offer.get("add_button"):
                 # Use the specific offer's add button from AOD
                 await self._log_step("adding_to_cart", "Clicking Add to Cart for selected AOD offer...")
                 try:
                     await aod_offer["add_button"].click()
 
-                    # Event-driven wait: Wait for cart confirmation elements
-                    cart_confirm = await self._wait_for_element(
-                        page, "cart_confirm_ready", timeout=TIMEOUT_MS_CART_CONFIRM
-                    )
-                    if cart_confirm:
-                        await self._log_step("cart_confirm_detected", f"Cart confirmation appeared", {"selector": cart_confirm})
+                    if FAST_CHECKOUT:
+                        # FAST CHECKOUT: Skip cart confirmation, navigate directly to checkout
+                        await self._log_step("fast_checkout_enabled", f"Fast checkout: waiting {FAST_CHECKOUT_DELAY_MS}ms then navigating directly to checkout")
+                        await asyncio.sleep(FAST_CHECKOUT_DELAY_MS / 1000.0)
+
+                        # Navigate directly to checkout entry point
+                        checkout_url = "https://www.amazon.com/checkout/entry/cart?proceedToCheckout=1&useDefaultCart=1&pipelineType=Chewbacca"
+                        await page.goto(checkout_url, wait_until="domcontentloaded", timeout=TIMEOUT_MS_CHECKOUT_LOAD)
+                        await self._log_step("fast_checkout_navigated", f"Navigated to checkout entry", {"url": checkout_url})
+
+                        # Wait for checkout page to be ready
+                        checkout_ready = await self._wait_for_element(
+                            page, "checkout_ready", timeout=TIMEOUT_MS_CHECKOUT_READY
+                        )
+                        if checkout_ready:
+                            await self._log_step("fast_checkout_ready", "Checkout page ready via fast checkout", {"selector": checkout_ready})
+                        used_fast_checkout = True
                     else:
-                        await asyncio.sleep(1.0)  # Fallback
+                        # Standard flow: Wait for cart confirmation elements
+                        cart_confirm = await self._wait_for_element(
+                            page, "cart_confirm_ready", timeout=TIMEOUT_MS_CART_CONFIRM
+                        )
+                        if cart_confirm:
+                            await self._log_step("cart_confirm_detected", f"Cart confirmation appeared", {"selector": cart_confirm})
+                        else:
+                            await asyncio.sleep(1.0)  # Fallback
 
                     self._update_state(FlowState.WAITING_CART_CONFIRMATION)
                 except Exception as e:
@@ -1619,8 +1643,8 @@ class AmazonFlow:
                         return result
                     await self._log_step("added_to_cart", "Item added to cart")
 
-            # Step 7: Cart confirmation (skip if Buy Now was used)
-            if not used_buy_now:
+            # Step 7: Cart confirmation (skip if Buy Now or Fast Checkout was used)
+            if not used_buy_now and not used_fast_checkout:
                 result = await self._step_wait_cart_confirmation(page)
                 if not result.success:
                     return result
