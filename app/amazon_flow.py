@@ -1141,22 +1141,18 @@ class AmazonFlow:
                             if await expand_elem.is_visible(timeout=500):
                                 await expand_elem.click()
                                 await self._log_step("debug_clicked_expand", f"Clicked {sel} to expand")
-                                await asyncio.sleep(1)  # Wait for expansion
+                                # Event-driven wait: wait for additional content to appear
+                                try:
+                                    additional_content = page.locator("#aod-pinned-offer-additional-content").first
+                                    await additional_content.wait_for(state="visible", timeout=2000)
+                                    await self._log_step("debug_additional_now_visible", "Additional content now visible!")
+                                except:
+                                    await self._log_step("debug_additional_still_hidden", "Additional content did not appear after click")
                                 break
                         except:
                             continue
                 except Exception as e:
                     await self._log_step("debug_expand_error", f"Error trying to expand: {str(e)}")
-
-                # Check again after potential expansion
-                try:
-                    additional_after = page.locator("#aod-pinned-offer-additional-content").first
-                    if await additional_after.is_visible(timeout=1000):
-                        await self._log_step("debug_additional_now_visible", "Additional content now visible!")
-                    else:
-                        await self._log_step("debug_additional_still_hidden", "Additional content still hidden")
-                except:
-                    pass
 
                 # =================================================================
                 # SCOPED EXTRACTION: All selectors scoped to pinned_offer element
