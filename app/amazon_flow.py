@@ -993,14 +993,69 @@ class AmazonFlow:
         # Only require ships from Amazon - seller can be third party if price matches
         return is_valid_shipper
 
-    async def _find_valid_amazon_offer_in_aod(self, page: Page) -> Optional[Dict[str, Any]]:
+    async def _extract_offer_price(self, offer_element, offer_name: str) -> Optional[float]:
+        """Extract price from an individual AOD offer element."""
+        import re
+
+        # Price selectors scoped to the offer element
+        price_selectors = [
+            ".aok-offscreen",
+            ".a-price .a-offscreen",
+            ".a-price-whole",
+            ".a-offscreen",
+            "[data-a-color='price'] .a-offscreen",
+        ]
+
+        for selector in price_selectors:
+            try:
+                elem = offer_element.locator(selector).first
+                if await elem.is_visible(timeout=200):
+                    text = (await elem.inner_text()).strip()
+                    price_match = re.search(r'\$?([\d,]+\.?\d*)', text)
+                    if price_match:
+                        price = float(price_match.group(1).replace(',', ''))
+                        await self._log_step("debug_offer_price", f"{offer_name}: Extracted price ${price:.2f}", {
+                            "offer": offer_name,
+                            "price": price,
+                            "selector": selector
+                        })
+                        return price
+            except:
+                continue
+
+        # Fallback: Try JS evaluation within the offer
+        try:
+            price_text = await offer_element.evaluate("""
+                (el) => {
+                    const priceEl = el.querySelector('.aok-offscreen') ||
+                                   el.querySelector('.a-price .a-offscreen') ||
+                                   el.querySelector('.a-offscreen');
+                    return priceEl ? priceEl.innerText : null;
+                }
+            """)
+            if price_text:
+                price_match = re.search(r'\$?([\d,]+\.?\d*)', price_text)
+                if price_match:
+                    price = float(price_match.group(1).replace(',', ''))
+                    await self._log_step("debug_offer_price_js", f"{offer_name}: JS extracted price ${price:.2f}", {
+                        "offer": offer_name,
+                        "price": price
+                    })
+                    return price
+        except:
+            pass
+
+        await self._log_step("debug_offer_price_failed", f"{offer_name}: Could not extract price")
+        return None
+
+    async def _find_valid_amazon_offer_in_aod(self, page: Page, expected_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
-        Traverse AOD offers to find first valid Amazon offer.
-        Valid = Ships from Amazon.com AND (Sold by Amazon.com OR Amazon Resale OR Amazon Warehouse)
+        Traverse AOD offers to find first valid Amazon offer at or below expected price.
+        Valid = Ships from Amazon.com AND price <= expected_price (if specified)
 
         Checks in order:
-        1. Pinned offer (featured offer at top)
-        2. Offer list (additional offers below)
+        1. Pinned offer (featured offer at top) - must match expected price
+        2. Offer list (sorted by price ascending) - stops when price > expected
 
         Returns dict with offer info if found, None otherwise.
         """
@@ -1103,49 +1158,57 @@ class AmazonFlow:
                 except:
                     pass
 
-                # Try getting element text even if not "visible" (use evaluate for hidden elements)
-                try:
-                    ships_text = await page.locator("#aod-offer-shipsFrom").first.inner_text(timeout=2000)
-                    await self._log_step("debug_ships_innertext", f"Got ships text via inner_text: '{ships_text}'")
-                except Exception as e:
-                    await self._log_step("debug_ships_innertext", f"inner_text failed: {str(e)}")
+                # =================================================================
+                # SCOPED EXTRACTION: All selectors scoped to pinned_offer element
+                # =================================================================
 
-                # Try JavaScript evaluation to get text
-                try:
-                    js_ships = await page.evaluate("document.querySelector('#aod-offer-shipsFrom')?.innerText || 'NOT FOUND'")
-                    await self._log_step("debug_ships_js", f"JS eval ships: '{js_ships}'")
-                    js_sold = await page.evaluate("document.querySelector('#aod-offer-soldBy')?.innerText || 'NOT FOUND'")
-                    await self._log_step("debug_sold_js", f"JS eval sold: '{js_sold}'")
-                except Exception as e:
-                    await self._log_step("debug_js_error", f"JS eval error: {str(e)}")
+                # Extract price from pinned offer FIRST
+                pinned_price = await self._extract_offer_price(pinned_offer, "pinned")
+                await self._log_step("debug_pinned_price", f"Pinned offer price: ${pinned_price:.2f}" if pinned_price else "Pinned offer price: None", {
+                    "price": pinned_price,
+                    "expected_price": expected_price
+                })
 
-                # Get ships_from - element should be visible now after wait
+                # Check price against expected BEFORE extracting seller info
+                if expected_price is not None and pinned_price is not None:
+                    if pinned_price != expected_price:
+                        await self._log_step("aod_pinned_price_mismatch",
+                            f"Pinned offer price ${pinned_price:.2f} != expected ${expected_price:.2f}, checking offer list...", {
+                            "pinned_price": pinned_price,
+                            "expected_price": expected_price
+                        })
+                        # Don't select pinned offer - price doesn't match
+                        raise Exception("Price mismatch - skip to offer list")
+
+                # SCOPED: Get ships_from from within pinned_offer element
                 try:
-                    ships_container = page.locator("#aod-offer-shipsFrom").first
+                    ships_container = pinned_offer.locator("#aod-offer-shipsFrom, [id*='shipsFrom']").first
                     if await ships_container.is_visible(timeout=500):
                         text = (await ships_container.inner_text()).strip()
+                        await self._log_step("debug_pinned_ships_text", f"Pinned ships container text: '{text}'")
                         lines = [l.strip() for l in text.split('\n') if l.strip()]
                         for line in lines:
                             if 'ships from' not in line.lower() and len(line) > 1:
                                 ships_from = line
                                 break
-                except:
-                    pass
+                except Exception as e:
+                    await self._log_step("debug_pinned_ships_error", f"Scoped ships extraction error: {str(e)}")
 
-                # Get sold_by
+                # SCOPED: Get sold_by from within pinned_offer element
                 try:
-                    # Try link first (most common)
-                    sold_link = page.locator("#aod-offer-soldBy a").first
+                    sold_link = pinned_offer.locator("#aod-offer-soldBy a, [id*='soldBy'] a").first
                     if await sold_link.is_visible(timeout=500):
                         sold_by = (await sold_link.inner_text()).strip()
+                        await self._log_step("debug_pinned_sold_link", f"Pinned sold_by from link: '{sold_by}'")
                 except:
                     pass
 
                 if not sold_by:
                     try:
-                        sold_container = page.locator("#aod-offer-soldBy").first
+                        sold_container = pinned_offer.locator("#aod-offer-soldBy, [id*='soldBy']").first
                         if await sold_container.is_visible(timeout=500):
                             text = (await sold_container.inner_text()).strip()
+                            await self._log_step("debug_pinned_sold_text", f"Pinned sold container text: '{text}'")
                             lines = [l.strip() for l in text.split('\n') if l.strip()]
                             for line in lines:
                                 if 'sold by' not in line.lower() and len(line) > 1:
@@ -1154,8 +1217,43 @@ class AmazonFlow:
                     except:
                         pass
 
-                await self._log_step("aod_pinned_checked", f"Pinned offer: Ships from '{ships_from}', Sold by '{sold_by}'", {
+                # FALLBACK: JS evaluation scoped to pinned offer element
+                if not ships_from or not sold_by:
+                    try:
+                        js_result = await pinned_offer.evaluate("""
+                            (el) => {
+                                const shipsEl = el.querySelector('#aod-offer-shipsFrom, [id*="shipsFrom"]');
+                                const soldEl = el.querySelector('#aod-offer-soldBy a, [id*="soldBy"] a') ||
+                                              el.querySelector('#aod-offer-soldBy, [id*="soldBy"]');
+                                return {
+                                    ships_text: shipsEl ? shipsEl.innerText : null,
+                                    sold_text: soldEl ? soldEl.innerText : null
+                                };
+                            }
+                        """)
+                        await self._log_step("debug_pinned_js_eval", f"Pinned JS extraction: {js_result}")
+
+                        if not ships_from and js_result.get("ships_text"):
+                            text = js_result["ships_text"].strip()
+                            lines = [l.strip() for l in text.split('\n') if l.strip()]
+                            for line in lines:
+                                if 'ships from' not in line.lower() and len(line) > 1:
+                                    ships_from = line
+                                    break
+
+                        if not sold_by and js_result.get("sold_text"):
+                            text = js_result["sold_text"].strip()
+                            lines = [l.strip() for l in text.split('\n') if l.strip()]
+                            for line in lines:
+                                if 'sold by' not in line.lower() and len(line) > 1:
+                                    sold_by = line
+                                    break
+                    except Exception as e:
+                        await self._log_step("debug_pinned_js_error", f"JS eval error: {str(e)}")
+
+                await self._log_step("aod_pinned_checked", f"Pinned offer: Price=${pinned_price}, Ships from '{ships_from}', Sold by '{sold_by}'", {
                     "offer_type": "pinned",
+                    "price": pinned_price,
                     "ships_from": ships_from,
                     "sold_by": sold_by
                 })
@@ -1164,6 +1262,7 @@ class AmazonFlow:
                     await self._log_step("aod_valid_offer_found", "Valid Amazon offer found in pinned offer", {
                         "ships_from": ships_from,
                         "sold_by": sold_by,
+                        "price": pinned_price,
                         "offer_type": "pinned"
                     })
 
@@ -1180,6 +1279,7 @@ class AmazonFlow:
                             "offer_index": "pinned",
                             "ships_from": ships_from,
                             "sold_by": sold_by,
+                            "price": pinned_price,
                             "add_button": add_button
                         }
                 else:
@@ -1205,24 +1305,58 @@ class AmazonFlow:
         # Get all offer cards in the list
         offer_cards = page.locator("#aod-offer")
         count = await offer_cards.count()
-        await self._log_step("aod_offers_found", f"Found {count} offers in offer list", {"count": count})
+        await self._log_step("aod_offers_found", f"Found {count} offers in offer list", {
+            "count": count,
+            "expected_price": expected_price
+        })
 
-        # Traverse each offer in the list
+        # Traverse each offer in the list (sorted by price ascending)
+        # EARLY TERMINATION: Stop when price exceeds expected price
         for i in range(count):
             offer = offer_cards.nth(i)
 
+            # STEP 1: Extract price FIRST (offers are sorted by price ascending)
+            offer_price = await self._extract_offer_price(offer, f"offer_{i}")
+
+            # STEP 2: Early termination if price exceeds expected
+            if expected_price is not None and offer_price is not None:
+                if offer_price > expected_price:
+                    await self._log_step("aod_price_exceeded",
+                        f"Offer {i+1} price ${offer_price:.2f} > expected ${expected_price:.2f}, stopping traversal", {
+                        "offer_index": i,
+                        "offer_price": offer_price,
+                        "expected_price": expected_price,
+                        "reason": "early_termination"
+                    })
+                    break  # No point checking further - prices only increase
+
+            # STEP 3: Only check seller if price is acceptable
             ships_from, sold_by = await self._extract_aod_offer_info(offer, f"offer_{i}")
 
-            await self._log_step("aod_offer_checked", f"Offer {i+1}: Ships from '{ships_from}', Sold by '{sold_by}'", {
+            await self._log_step("aod_offer_checked", f"Offer {i+1}: Price=${offer_price}, Ships from '{ships_from}', Sold by '{sold_by}'", {
                 "offer_index": i,
+                "price": offer_price,
                 "ships_from": ships_from,
-                "sold_by": sold_by
+                "sold_by": sold_by,
+                "expected_price": expected_price
             })
 
             if self._is_valid_amazon_offer(ships_from, sold_by):
+                # Additional price validation before selecting
+                if expected_price is not None and offer_price is not None:
+                    if offer_price != expected_price:
+                        await self._log_step("aod_offer_price_mismatch",
+                            f"Offer {i+1} has valid seller but price ${offer_price:.2f} != expected ${expected_price:.2f}, skipping", {
+                            "offer_index": i,
+                            "offer_price": offer_price,
+                            "expected_price": expected_price
+                        })
+                        continue  # Skip this offer - price doesn't match exactly
+
                 await self._log_step("aod_valid_offer_found", f"Valid Amazon offer found at index {i}", {
                     "ships_from": ships_from,
                     "sold_by": sold_by,
+                    "price": offer_price,
                     "offer_index": i
                 })
 
@@ -1240,12 +1374,16 @@ class AmazonFlow:
                             "offer_index": i,
                             "ships_from": ships_from,
                             "sold_by": sold_by,
+                            "price": offer_price,
                             "add_button": add_button
                         }
                 except Exception as e:
                     await self._log_step("aod_select_error", f"Error selecting offer {i}: {str(e)}")
 
-        await self._log_step("aod_no_valid_offer", "No valid Amazon offer found in AOD")
+        await self._log_step("aod_no_valid_offer", "No valid Amazon offer found in AOD at expected price", {
+            "expected_price": expected_price,
+            "offers_checked": count
+        })
         return None
 
     async def _log_step(self, step: str, message: str, details: Dict[str, Any] = None) -> None:
@@ -1416,14 +1554,14 @@ class AmazonFlow:
             # Step 4: Handle AOD offer selection OR standard seller validation
             aod_offer = None
             if is_aod:
-                # Find and select valid Amazon offer
-                aod_offer = await self._find_valid_amazon_offer_in_aod(page)
+                # Find and select valid Amazon offer at expected price
+                aod_offer = await self._find_valid_amazon_offer_in_aod(page, expected_price=expected_price)
                 if not aod_offer:
                     return FlowResult(
                         success=False,
                         state=FlowState.ERROR,
-                        message="No valid Amazon offer found in AOD",
-                        details={}
+                        message="No valid Amazon offer found in AOD at expected price",
+                        details={"expected_price": expected_price}
                     )
                 # Seller validation already done in AOD traversal, skip separate validation
             else:
