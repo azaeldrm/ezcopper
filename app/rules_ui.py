@@ -1335,21 +1335,28 @@ async def get_activity():
 
 @rules_app.post("/actions/trigger")
 async def trigger_flow_proxy(request: dict):
-    """Proxy trigger requests to main app."""
+    """Proxy trigger requests to main app.
+
+    Uses asyncio.to_thread to avoid blocking the shared event loop
+    (both servers run in the same asyncio.gather).
+    """
+    import asyncio
     import urllib.request
     import urllib.error
 
-    try:
+    def _sync_request():
         data = json.dumps(request).encode('utf-8')
         req = urllib.request.Request(
             "http://localhost:8000/actions/trigger",
             data=data,
             headers={'Content-Type': 'application/json'}
         )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return json.loads(response.read().decode('utf-8'))
 
-        with urllib.request.urlopen(req, timeout=5) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            return JSONResponse(content=result)
+    try:
+        result = await asyncio.to_thread(_sync_request)
+        return JSONResponse(content=result)
     except urllib.error.HTTPError as e:
         raise HTTPException(status_code=e.code, detail=f"Trigger failed: {e.reason}")
     except Exception as e:
