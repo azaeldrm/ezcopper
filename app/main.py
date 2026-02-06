@@ -64,6 +64,9 @@ shutdown_event: asyncio.Event = asyncio.Event()
 class TriggerRequest(BaseModel):
     """Request model for manual URL trigger."""
     url: str
+    price: Optional[float] = None
+    message_id: Optional[str] = None
+    product: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -328,12 +331,20 @@ async def trigger_url(request: TriggerRequest, background_tasks: BackgroundTasks
     if not browser_manager.is_running:
         raise HTTPException(status_code=503, detail="Browser not initialized")
 
+    # Generate message_id if not provided
+    message_id = request.message_id or f"manual-trigger-{datetime.now(timezone.utc).timestamp()}"
+
     # Queue the URL for processing
     await url_queue.put({
         "url": request.url,
         "message": {
             "source": "manual_trigger",
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message_id": message_id,
+            "product": request.product or "Manual trigger"
+        },
+        "parsed": {
+            "price": request.price
         }
     })
 
@@ -342,7 +353,12 @@ async def trigger_url(request: TriggerRequest, background_tasks: BackgroundTasks
             EventType.STEP,
             "manual_trigger",
             url=request.url,
-            details={"message": "URL queued for processing"}
+            details={
+                "message": "URL queued for manual testing",
+                "message_id": message_id,
+                "product": request.product,
+                "price": request.price
+            }
         )
     )
 

@@ -521,8 +521,8 @@ class DiscordWatcher:
 
     async def _seed_existing_messages(self, page, channel_url: str) -> None:
         """
-        On startup: mark ALL existing messages as seen (including the last one).
-        This allows all channels to load quickly before any processing begins.
+        On startup: quickly mark ALL existing messages as seen by grabbing IDs only.
+        This allows instant startup without parsing message content.
         New messages arriving after startup will be processed normally.
         """
         channel_name = self.get_channel_name(channel_url)
@@ -540,20 +540,32 @@ class DiscordWatcher:
                     details={
                         "total_visible": count,
                         "channel": channel_name,
-                        "message": f"[{channel_name}] Marking {count} existing messages as seen"
+                        "message": f"[{channel_name}] Quick-seeding {count} message IDs (no parsing)"
                     }
                 )
             )
 
-            # Mark ALL messages as seen (skip analysis to allow fast startup)
+            # Quick seed: Just grab IDs from DOM without parsing content (FAST!)
             for i in range(count):
                 element = message_elements.nth(i)
-                message = await self._parse_message_element(page, element)
-                if message and message.message_id:
-                    self._seen_message_ids.add(message.message_id)
+                # Get the message ID directly from the DOM element's 'id' attribute
+                msg_id = await element.get_attribute("id")
+                if msg_id:
+                    self._seen_message_ids.add(msg_id)
 
             # Save the seeded state
             self._save_state()
+
+            await event_broker.publish(
+                event_broker.create_event(
+                    EventType.STEP,
+                    "seeding_complete",
+                    details={
+                        "channel": channel_name,
+                        "message": f"[{channel_name}] Seeded {len(self._seen_message_ids)} messages instantly"
+                    }
+                )
+            )
 
         except Exception as e:
             await event_broker.publish(
@@ -644,6 +656,32 @@ class DiscordWatcher:
             except Exception:
                 pass
 
+    async def _init_and_seed_channel(self, channel_url: str) -> bool:
+        """Initialize and seed a single channel (for parallel loading)."""
+        try:
+            if not await self.navigate_to_channel(channel_url):
+                await event_broker.publish(
+                    event_broker.create_event(
+                        EventType.ERROR,
+                        "channel_init_failed",
+                        details={"channel_url": channel_url}
+                    )
+                )
+                return False
+
+            page = await browser_manager.get_or_create_discord_page(channel_url)
+            await self._seed_existing_messages(page, channel_url)
+            return True
+        except Exception as e:
+            await event_broker.publish(
+                event_broker.create_event(
+                    EventType.ERROR,
+                    "channel_init_error",
+                    details={"channel_url": channel_url, "error": str(e)}
+                )
+            )
+            return False
+
     async def start_watching(self) -> None:
         """Start watching Discord channels for new messages."""
         self._load_state()
@@ -662,20 +700,31 @@ class DiscordWatcher:
             )
         )
 
-        # Navigate to all channels and seed messages
-        for channel_url in self.channel_urls:
-            if not await self.navigate_to_channel(channel_url):
-                await event_broker.publish(
-                    event_broker.create_event(
-                        EventType.ERROR,
-                        "channel_init_failed",
-                        details={"channel_url": channel_url}
-                    )
-                )
-                continue
+        # Load and seed all channels in parallel for faster startup
+        await event_broker.publish(
+            event_broker.create_event(
+                EventType.STEP,
+                "parallel_channel_init",
+                details={"message": f"Loading {len(self.channel_urls)} channels in parallel..."}
+            )
+        )
 
-            page = await browser_manager.get_or_create_discord_page(channel_url)
-            await self._seed_existing_messages(page, channel_url)
+        tasks = [self._init_and_seed_channel(url) for url in self.channel_urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Log any failures
+        successful = sum(1 for r in results if r is True)
+        await event_broker.publish(
+            event_broker.create_event(
+                EventType.STEP,
+                "parallel_init_complete",
+                details={
+                    "total": len(self.channel_urls),
+                    "successful": successful,
+                    "failed": len(self.channel_urls) - successful
+                }
+            )
+        )
 
         await event_broker.publish(
             event_broker.create_event(
